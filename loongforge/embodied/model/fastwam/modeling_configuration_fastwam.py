@@ -83,6 +83,11 @@ class FastWAMModelConfig:
     # None so SDPA can dispatch to its flash kernel. The all-True check runs once per
     # (expert, shape) and a non-trivial mask is always kept.
     drop_all_true_cross_attn_mask: bool = False
+    # All FastWAM parameters and activations are already bf16 (`dtype` above), so the
+    # trainer-level `torch.autocast("cuda", bf16)` around the model call only adds
+    # per-op dtype checks and cast bookkeeping. Set True to drop it, as DreamZero and
+    # Cosmos3 already do.
+    disable_train_autocast: bool = False
 
     # ── Nested architecture configs (fixed for Wan2.2-5B, not in YAML) ────────
     video_dit_config: dict[str, Any] = field(default_factory=lambda: {
