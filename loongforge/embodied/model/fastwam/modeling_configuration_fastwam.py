@@ -88,6 +88,13 @@ class FastWAMModelConfig:
     # per-op dtype checks and cast bookkeeping. Set True to drop it, as DreamZero and
     # Cosmos3 already do.
     disable_train_autocast: bool = False
+    # torch.compile scope for the online VAE encode of the input frames: a conv3d
+    # stack with a fixed shape every step. Off by default.
+    # Keep `compile_dynamic=False`: every dimension in the compiled region is fixed by
+    # the config, and a dynamic dim here would let a data-dependent shape into the
+    # graph and trigger recompiles mid-training.
+    compile_vae_encode: bool = False
+    compile_dynamic: bool = False
 
     # ── Nested architecture configs (fixed for Wan2.2-5B, not in YAML) ────────
     video_dit_config: dict[str, Any] = field(default_factory=lambda: {

@@ -92,6 +92,9 @@ class FastWAMPolicy(nn.Module):
             loss_lambda_video=float(config.loss["lambda_video"]),
             loss_lambda_action=float(config.loss["lambda_action"]),
         )
+        if config.compile_vae_encode:
+            core.vae.encode = torch.compile(core.vae.encode, dynamic=config.compile_dynamic)
+            logger.info("[compile] torch.compile on VAE encode (dynamic=%s)", config.compile_dynamic)
         return cls(core)
 
     def forward(self, batch: Any) -> Dict[str, torch.Tensor]:
