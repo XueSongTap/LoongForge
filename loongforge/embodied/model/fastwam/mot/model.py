@@ -61,6 +61,8 @@ class MoT(nn.Module):
         mixtures: Dict[str, nn.Module],
         mot_checkpoint_mixed_attn: bool = True,
         drop_all_true_cross_attn_mask: bool = False,
+        compile_mot_blocks: str = "none",
+        compile_dynamic: bool = False,
     ):
         """Initialize expert modules and validate shared transformer geometry."""
         super().__init__()
@@ -106,6 +108,26 @@ class MoT(nn.Module):
         for name in self.expert_order:
             expert = self.mixtures[name]
             logger.info(f"  Expert '{name}': num_params={sum(p.numel() for p in expert.parameters()) / 1e9:.2f} B")
+
+        if compile_mot_blocks != "none":
+            # The two units around mixed attention are the compilable part of a layer:
+            # every shape in them is fixed by the config, and mixed attention itself
+            # stays eager (a single SDPA call, optionally checkpointed). They are
+            # switched separately because they fragment very differently: `pre` holds
+            # two TE RMSNorms plus two Triton RoPE calls that Dynamo cannot trace,
+            # while `post` holds the FFN and gate/modulate chain.
+            if compile_mot_blocks in ("pre", "both"):
+                self._build_expert_attention_io = torch.compile(
+                    self._build_expert_attention_io, dynamic=compile_dynamic
+                )
+            if compile_mot_blocks in ("post", "both"):
+                self._apply_expert_post_block = torch.compile(
+                    self._apply_expert_post_block, dynamic=compile_dynamic
+                )
+            logger.info(
+                "[compile] torch.compile on MoT blocks=%s (dynamic=%s)",
+                compile_mot_blocks, compile_dynamic,
+            )
 
     @staticmethod
     def _split_modulation(block, t_mod: torch.Tensor):

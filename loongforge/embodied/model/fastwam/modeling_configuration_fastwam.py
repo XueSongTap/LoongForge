@@ -88,12 +88,22 @@ class FastWAMModelConfig:
     # per-op dtype checks and cast bookkeeping. Set True to drop it, as DreamZero and
     # Cosmos3 already do.
     disable_train_autocast: bool = False
-    # torch.compile scope for the online VAE encode of the input frames: a conv3d
-    # stack with a fixed shape every step. Off by default.
-    # Keep `compile_dynamic=False`: every dimension in the compiled region is fixed by
-    # the config, and a dynamic dim here would let a data-dependent shape into the
-    # graph and trigger recompiles mid-training.
+    # torch.compile scopes, off by default and independently switchable.
+    #   compile_vae_encode  — the online VAE encode of the input frames, a conv3d
+    #                         stack with a fixed shape every step.
+    #   mot_compile_blocks  — which of the two per-layer MoT units around mixed
+    #                         attention to compile: none | pre | post | both.
+    #                         `pre` (`_build_expert_attention_io`) holds two TE
+    #                         RMSNorms and two Triton RoPE calls, none of which
+    #                         Dynamo can trace, so it fragments badly; `post`
+    #                         (`_apply_expert_post_block`) holds the FFN and the
+    #                         gate/modulate chain, where Inductor has something to
+    #                         fuse. Measure before trusting either.
+    # Keep `compile_dynamic=False`: every dimension in these regions is fixed by the
+    # config (batch, 294/32 tokens, 129 context), and a dynamic dim here would let a
+    # data-dependent shape into the graph and trigger recompiles mid-training.
     compile_vae_encode: bool = False
+    mot_compile_blocks: str = "none"  # {"none", "pre", "post", "both"}
     compile_dynamic: bool = False
 
     # ── Nested architecture configs (fixed for Wan2.2-5B, not in YAML) ────────
@@ -137,6 +147,14 @@ class FastWAMModelConfig:
             raise ValueError(
                 f"FastWAMModelConfig.variant must be one of {sorted(valid_variants)}, "
                 f"got {self.variant!r}"
+            )
+
+        # ── Validate mot_compile_blocks ───────────────────────────────────────
+        valid_compile_scopes = {"none", "pre", "post", "both"}
+        if self.mot_compile_blocks not in valid_compile_scopes:
+            raise ValueError(
+                "FastWAMModelConfig.mot_compile_blocks must be one of "
+                f"{sorted(valid_compile_scopes)}, got {self.mot_compile_blocks!r}"
             )
 
         # ── Validate rmsnorm_impl ─────────────────────────────────────────────
