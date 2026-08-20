@@ -76,6 +76,13 @@ class FastWAMModelConfig:
     # from torch 2.9.0 on the native kernel wins at the DiT's hidden size (3072),
     # which TE 2.9 has no tuned kernel for. See `wan.dit.make_rmsnorm`.
     rmsnorm_impl: str = "wan"  # {"wan", "te"}
+    # Cross-attention masks produced by this pipeline are all-True: text padding is
+    # expressed by zeroing the embeddings (see `fastwam_collator._build_context` and
+    # `FastWAM._encode_prompt`), not by masking. Passing such a mask to SDPA still
+    # forces the masked attention kernel. When True, an all-True mask is replaced by
+    # None so SDPA can dispatch to its flash kernel. The all-True check runs once per
+    # (expert, shape) and a non-trivial mask is always kept.
+    drop_all_true_cross_attn_mask: bool = False
 
     # ── Nested architecture configs (fixed for Wan2.2-5B, not in YAML) ────────
     video_dit_config: dict[str, Any] = field(default_factory=lambda: {

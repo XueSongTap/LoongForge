@@ -60,6 +60,7 @@ class MoT(nn.Module):
         self,
         mixtures: Dict[str, nn.Module],
         mot_checkpoint_mixed_attn: bool = True,
+        drop_all_true_cross_attn_mask: bool = False,
     ):
         """Initialize expert modules and validate shared transformer geometry."""
         super().__init__()
@@ -71,6 +72,10 @@ class MoT(nn.Module):
         self.mixtures = nn.ModuleDict(mixtures)
         self.expert_order = list(self.mixtures.keys())
         self.mot_checkpoint_mixed_attn = mot_checkpoint_mixed_attn
+        self.drop_all_true_cross_attn_mask = drop_all_true_cross_attn_mask
+        # (expert, mask shape) -> is the mask all True. Filled on first sight so the
+        # device->host sync of `mask.all()` happens once per shape, not per step.
+        self._all_true_ctx_mask: Dict[tuple, bool] = {}
         if mot_checkpoint_mixed_attn:
             logger.info(
                 "Using gradient checkpointing for mixture attention. This will save memory but use more computation."
@@ -496,6 +501,35 @@ class MoT(nn.Module):
             )
         return x
 
+    def _drop_all_true_mask(self, name: str, payload: Optional[dict]) -> Optional[dict]:
+        """Return `payload` with an all-True cross-attention mask replaced by None.
+
+        A bool mask that is True everywhere is a no-op for attention, but SDPA still
+        takes its masked code path for it. Dropping it lets SDPA pick the flash
+        kernel. Only all-True masks are dropped; the group-causal action masks built
+        by `WanVideoDiT` are left untouched.
+        """
+        if not payload:
+            return payload
+        mask = payload.get("mask")
+        if not isinstance(mask, torch.Tensor) or mask.dtype != torch.bool:
+            return payload
+
+        key = (name, tuple(mask.shape))
+        all_true = self._all_true_ctx_mask.get(key)
+        if all_true is None:
+            all_true = bool(mask.all())
+            self._all_true_ctx_mask[key] = all_true
+            logger.info(
+                "Cross-attention mask for expert '%s' with shape %s is all_true=%s -> %s",
+                name, tuple(mask.shape), all_true, "dropped" if all_true else "kept",
+            )
+        if not all_true:
+            return payload
+        stripped = dict(payload)
+        stripped["mask"] = None
+        return stripped
+
     def forward(
         self,
         embeds_all: Dict[str, torch.Tensor],
@@ -521,6 +555,9 @@ class MoT(nn.Module):
             raise ValueError(f"`attention_mask` must be square, got shape {tuple(attention_mask.shape)}")
 
         tokens_all = {k: v for k, v in embeds_all.items()}
+
+        if self.drop_all_true_cross_attn_mask:
+            context_all = {k: self._drop_all_true_mask(k, v) for k, v in context_all.items()}
 
         for layer_idx in range(self.num_layers):
             q_chunks = []
