@@ -112,6 +112,8 @@ TRAINING_ARGS=(
     --lr-warmup-iters 0
     --min-lr 1.0e-9
     # Optimizer
+    --optimizer TorchFusedAdamW
+    --cudnn-benchmark
     --clip-grad 1.0
     --weight-decay 0.01
     --adam-beta1 0.9
@@ -133,6 +135,7 @@ DISTRIBUTED_TRAINING_ARGS=(
     --no-ddp-broadcast-buffers
     --ddp-bucket-cap-mb 200
     --dtype bfloat16
+    --zero-parameters-as-bucket-view
 )
 
 # ── Logging params ────────────────────────────────────────────
@@ -143,7 +146,13 @@ LOGGING_ARGS=(
 )
 
 # ── Model/data dotlist overrides ──────────────────────────────
-MODEL_DATA_OVERRIDES=()
+MODEL_DATA_OVERRIDES=(
+    model.disable_train_autocast=true
+    model.drop_all_true_cross_attn_mask=true
+    model.compile_vae_encode=true
+    model.mot_compile_blocks=both
+    model.rmsnorm_impl=wan
+)
 if [[ -n "$ACTION_DIT_PRETRAINED_PATH" ]]; then
     MODEL_DATA_OVERRIDES+=("model.action_dit_pretrained_path=$ACTION_DIT_PRETRAINED_PATH")
 fi
