@@ -282,7 +282,7 @@ If you use TAOT for MoE training in LoongForge, you can cite our paper:
 
 ## 🙏 Acknowledgments
 
-LoongForge builds on NVIDIA's Megatron-LM and draws inspiration from many excellent open-source projects, including HuggingFace Transformers, LLaMA-Factory, Megatron-Bridge, and LeRobot, as well as the official implementations of the models it supports (e.g. OpenPI, NVIDIA Isaac GR00T). We sincerely thank these communities for their outstanding contributions.
+LoongForge builds on NVIDIA's Megatron-LM and draws inspiration from many excellent open-source projects, including HuggingFace Transformers, LLaMA-Factory, Megatron-Bridge, and LeRobot, as well as the official implementations of the models it supports (e.g. OpenPI, NVIDIA Isaac GR00T). We sincerely thank these communities for their outstanding contributions, and would also like to extend our gratitude to the LINUX DO community for its welcoming space for technical discussion and support for open-source sharing.
 
 ## 💬 Contact
 <a id="contact"></a>
