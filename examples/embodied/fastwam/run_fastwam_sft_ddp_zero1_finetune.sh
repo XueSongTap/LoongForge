@@ -146,13 +146,7 @@ LOGGING_ARGS=(
 )
 
 # ── Model/data dotlist overrides ──────────────────────────────
-MODEL_DATA_OVERRIDES=(
-    model.disable_train_autocast=true
-    model.drop_all_true_cross_attn_mask=true
-    model.compile_vae_encode=true
-    model.mot_compile_blocks=both
-    model.rmsnorm_impl=wan
-)
+MODEL_DATA_OVERRIDES=()
 if [[ -n "$ACTION_DIT_PRETRAINED_PATH" ]]; then
     MODEL_DATA_OVERRIDES+=("model.action_dit_pretrained_path=$ACTION_DIT_PRETRAINED_PATH")
 fi
