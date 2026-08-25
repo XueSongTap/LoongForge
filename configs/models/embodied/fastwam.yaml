@@ -22,7 +22,6 @@ model:
   action_dit_pretrained_path: checkpoints/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt
   redirect_common_files: true
   dtype: bfloat16
-  # RMSNorm kernel for DiT q/k and VAE: te for torch < 2.9, wan for torch >= 2.9
   rmsnorm_impl: wan
   disable_train_autocast: true
   drop_all_true_cross_attn_mask: true
