@@ -1,9 +1,7 @@
 name: PR Title Check
 
 on:
-  pull_request:
-    types: [opened, edited, reopened, synchronize]
-  workflow_dispatch:
+  workflow_call:
 
 permissions:
   pull-requests: read
@@ -16,45 +14,23 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
+      - name: Skip outside a pull request
+        if: github.event_name != 'pull_request'
+        run: echo "PR title validation is only applicable to pull requests."
+
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          persist-credentials: false
+
       - uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
         with:
           script: |
-            const title = context.payload.pull_request?.title || "";
-            const TYPES = ["feat","fix","refactor","perf","docs","test","chore","ci"];
-            const MODULES = new Set([
-              "llm","vlm","vla","diffusion",
-              "train","data","ops","ckpt","peft",
-              "docker","xpu","ci","docs","tests","scripts","release",
-            ]);
-            const re = /^(?<breaking>\[BREAKING\])?\[(?<mods>[a-zA-Z0-9,\s\-]+)\]\s+(?<type>[a-zA-Z]+):\s+.+$/;
-            const m = title.match(re);
-            const fail = (msg) => core.setFailed(msg);
-            if (!m) {
-              fail([
-                `PR title "${title}" does not match required format.`,
-                ``,
-                `Expected: [<modules>] <type>: <description>`,
-                `      or: [BREAKING][<modules>] <type>: <description>`,
-                ``,
-                `Valid types:   ${TYPES.join(", ")}`,
-                `Valid modules: ${[...MODULES].join(", ")}`,
-                ``,
-                `Example: [llm, ckpt] feat: support Qwen3-Next checkpoint conversion`,
-              ].join("\n"));
+            const { validatePullRequestTitle } = require('./.github/scripts/pr_title');
+            const result = validatePullRequestTitle(context.payload.pull_request?.title || '');
+            if (!result.ok) {
+              core.setFailed(result.message);
               return;
             }
-            const typ = m.groups.type.toLowerCase();
-            if (!TYPES.includes(typ)) {
-              fail(`Invalid type "${typ}". Valid types: ${TYPES.join(", ")}`);
-              return;
-            }
-            const mods = m.groups.mods.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
-            const bad = mods.filter(x => !MODULES.has(x));
-            if (bad.length) {
-              fail([
-                `Invalid modules: ${bad.join(", ")}`,
-                `Valid modules: ${[...MODULES].join(", ")}`,
-              ].join("\n"));
-              return;
-            }
-            core.info(`OK: type=${typ}, modules=[${mods.join(", ")}]`);
+            core.info(`OK: type=${result.type}, modules=[${result.modules.join(', ')}]`);

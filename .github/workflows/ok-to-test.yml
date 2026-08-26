@@ -1,0 +1,141 @@
+name: GPU CI Dispatch
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+  actions: write
+
+concurrency:
+  group: gpu-dispatch-${{ github.event.issue.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: >-
+      github.event.issue.pull_request != null &&
+      startsWith(github.event.comment.body, '/ok-to-test')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: request
+        name: Parse command
+        env:
+          COMMENT: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          payload="$(printf '%s' "$COMMENT" | python .github/scripts/ci_command.py)"
+          echo "payload=$payload" >> "$GITHUB_OUTPUT"
+      - id: context
+        name: Resolve pull request head
+        uses: actions/github-script@v7
+        env:
+          REQUEST: ${{ steps.request.outputs.payload }}
+        with:
+          script: |
+            const request = JSON.parse(process.env.REQUEST);
+            const association = context.payload.comment.author_association;
+            if (!['OWNER', 'MEMBER', 'COLLABORATOR'].includes(association)) {
+              core.setFailed('only repository collaborators may trigger GPU CI');
+              return;
+            }
+
+            // TEMPORARY: the A800 regression runner is not registered yet.
+            // Reject llm_vlm requests with an explicit message until it is.
+            // Remove this block when the A800 self-hosted runner goes live.
+            if (request.suite !== 'embodied') {
+              core.setFailed(
+                'llm_vlm GPU regression is temporarily unavailable: the A800 runner is not set up yet. ' +
+                  'Only the embodied suite (P6K) is currently supported.',
+              );
+              return;
+            }
+
+            const { data: pull } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            const headRepo = pull.head.repo
+              || { full_name: `${context.repo.owner}/${context.repo.repo}` };
+            core.setOutput('pr_number', String(pull.number));
+            core.setOutput('head_repo', headRepo.full_name);
+            core.setOutput('head_sha', pull.head.sha);
+            core.setOutput('base_ref', pull.base.ref);
+            core.setOutput('suite', request.suite);
+            core.setOutput('models', request.models.join(','));
+            core.setOutput('build_image', String(request.build_image));
+      - name: Validate models against suite manifest
+        uses: ./.github/actions/validate-models
+        with:
+          suite: ${{ steps.context.outputs.suite }}
+          models: ${{ steps.context.outputs.models }}
+          repository: ${{ steps.context.outputs.head_repo }}
+          ref: ${{ steps.context.outputs.head_sha }}
+      - name: Dispatch immutable revision
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.context.outputs.pr_number }}
+          HEAD_REPO: ${{ steps.context.outputs.head_repo }}
+          HEAD_SHA: ${{ steps.context.outputs.head_sha }}
+          SUITE: ${{ steps.context.outputs.suite }}
+          MODELS: ${{ steps.context.outputs.models }}
+          BUILD_IMAGE: ${{ steps.context.outputs.build_image }}
+          BASE_REF: ${{ steps.context.outputs.base_ref }}
+        with:
+          script: |
+            const [headOwner, headRepo] = process.env.HEAD_REPO.split('/');
+            const { data: headCommit } = await github.rest.repos.getCommit({
+              owner: headOwner,
+              repo: headRepo,
+              ref: process.env.HEAD_SHA,
+            });
+            const { data: check } = await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'ci-gate',
+              head_sha: process.env.HEAD_SHA,
+              external_id: `loongforge-gpu:${process.env.PR_NUMBER}:${process.env.HEAD_SHA}`,
+              status: 'in_progress',
+              started_at: new Date().toISOString(),
+              output: {
+                title: 'GPU validation queued',
+                summary: `Waiting for suite: ${process.env.SUITE}`,
+              },
+            });
+
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'gpu-regression.yml',
+                ref: process.env.BASE_REF,
+                inputs: {
+                  pr_number: process.env.PR_NUMBER,
+                  head_repo: process.env.HEAD_REPO,
+                  head_sha: process.env.HEAD_SHA,
+                  tree_sha: headCommit.commit.tree.sha,
+                  suite: process.env.SUITE,
+                  models: process.env.MODELS,
+                  build_image: process.env.BUILD_IMAGE,
+                  gate_check_id: String(check.id),
+                },
+              });
+            } catch (error) {
+              await github.rest.checks.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                check_run_id: check.id,
+                status: 'completed',
+                conclusion: 'failure',
+                completed_at: new Date().toISOString(),
+                output: { title: 'GPU dispatch failed', summary: 'The regression workflow could not be dispatched.' },
+              });
+              throw error;
+            }
