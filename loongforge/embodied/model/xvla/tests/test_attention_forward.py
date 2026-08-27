@@ -123,7 +123,7 @@ _SAMPLE_ATOL = 2e-2
 def _fingerprint(t):
     f = t.detach().float().flatten()
     n = f.numel()
-    assert n > 0, f"fingerprinting empty tensor"
+    assert n > 0, "fingerprinting empty tensor"
     idx = [0, 1, n // 3, n // 2, n - 1]
     return {
         "shape": list(t.shape),
