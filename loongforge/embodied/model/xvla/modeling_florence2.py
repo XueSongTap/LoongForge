@@ -29,7 +29,6 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from torch.nn import CrossEntropyLoss 
 from collections import OrderedDict
-from einops import rearrange
 from timm.layers import DropPath
 
 from transformers.modeling_utils import PreTrainedModel
