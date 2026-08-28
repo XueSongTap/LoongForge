@@ -38,7 +38,7 @@ function selectLatestChecks(checkRuns, expectedNames) {
 }
 
 function shouldPollCpuChecks(results, suite) {
-  return results.validate !== 'cancelled' && results[suite] !== 'cancelled';
+  return results.validate === 'success' && results[suite] === 'success';
 }
 
 module.exports = { matchesCheckName, selectLatestChecks, shouldPollCpuChecks };

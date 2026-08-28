@@ -13,6 +13,7 @@ Usage:
     python3 ci/sensitive_scan.py                  # tracked + staged files
     python3 ci/sensitive_scan.py --history        # also git metadata
     python3 ci/sensitive_scan.py --strict         # warnings also fail
+    python3 ci/sensitive_scan.py --strict --ci-summary  # CI-safe aggregate
     python3 ci/sensitive_scan.py --format json
     python3 ci/sensitive_scan.py --rule corp-email --rule internal-domain
     python3 ci/sensitive_scan.py --paths docker/ tests/
@@ -33,6 +34,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass, asdict
+from typing import NoReturn
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -54,7 +56,7 @@ class Finding:
     hint: str
 
 
-def die(msg: str) -> "NoReturn":  # type: ignore[valid-type]
+def die(msg: str) -> NoReturn:
     print(f"sensitive-scan: {msg}", file=sys.stderr)
     raise SystemExit(2)
 
@@ -289,6 +291,58 @@ def report_text(findings: list[Finding], rules: list[dict], strict: bool) -> Non
         print("result: FAIL")
 
 
+def report_ci_summary(findings: list[Finding], strict: bool) -> None:
+    """Print an aggregate-only report suitable for public CI logs.
+
+    Locations and snippets are deliberately omitted: either can contain the
+    very value this scanner is intended to keep out of build logs.
+    """
+    counts: dict[tuple[str, str], int] = {}
+    for finding in findings:
+        key = (finding.severity, finding.rule)
+        counts[key] = counts.get(key, 0) + 1
+
+    errors = sum(
+        count for (severity, _), count in counts.items() if severity == "error"
+    )
+    warns = sum(
+        count for (severity, _), count in counts.items() if severity == "warn"
+    )
+    blocking = errors + (warns if strict else 0)
+    print(
+        f"sensitive-scan: {errors} error(s), {warns} warning(s), "
+        f"{len(findings)} total"
+    )
+    if counts:
+        for (severity, rule), count in sorted(counts.items()):
+            print(f"sensitive-scan: {severity} {rule} ({count})")
+    if blocking:
+        print(f"sensitive-scan: FAIL ({blocking} blocking finding(s))")
+    else:
+        print("sensitive-scan: PASS")
+
+
+def normalize_path_filters(path_filters: list[str], root: str) -> list[str]:
+    """Convert path arguments to repository-relative paths without leaking them."""
+    normalized = []
+    for raw in path_filters:
+        candidate = (
+            os.path.abspath(raw)
+            if os.path.isabs(raw)
+            else os.path.abspath(os.path.join(root, raw))
+        )
+        try:
+            relative = os.path.relpath(candidate, root)
+        except ValueError:
+            die("--paths must identify files inside the repository")
+        if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+            die("--paths must identify files inside the repository")
+        if relative == os.curdir:
+            continue
+        normalized.append(relative.replace(os.sep, "/"))
+    return normalized
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="sensitive-scan",
@@ -300,6 +354,8 @@ def main() -> int:
                              "but still present in HEAD")
     parser.add_argument("--strict", action="store_true",
                         help="treat warnings as blocking")
+    parser.add_argument("--ci-summary", action="store_true",
+                        help="print aggregate-only output safe for CI logs")
     parser.add_argument("--format", choices=("text", "json"), default="text")
     parser.add_argument("--rule", action="append", dest="rules", metavar="ID",
                         help="only run this rule (repeatable)")
@@ -314,15 +370,20 @@ def main() -> int:
             print(f"{rule['severity']:<5} {rule['id']:<28} {rule['title']}")
         return 0
 
-    os.chdir(repo_root())
+    root = repo_root()
+    os.chdir(root)
     rules = compile_rules(args.rules)
     allowlist = compile_allowlist()
 
-    findings = scan_worktree(rules, allowlist, args.paths)
+    findings = scan_worktree(
+        rules, allowlist, normalize_path_filters(args.paths, root)
+    )
     if args.history:
         findings.extend(scan_history(rules, allowlist))
 
-    if args.format == "json":
+    if args.ci_summary:
+        report_ci_summary(findings, args.strict)
+    elif args.format == "json":
         errors = sum(1 for f in findings if f.severity == "error")
         warns = len(findings) - errors
         json.dump(

@@ -20,7 +20,10 @@ launcher="${LOONGFORGE_REGRESSION_RUNNER:-}"
 if [[ -z "$launcher" ]]; then
   launcher="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/self_runner/run_regression.sh"
 fi
-[[ -x "$launcher" ]] || { echo "regression runner is not executable: $launcher" >&2; exit 2; }
+[[ -f "$launcher" && -x "$launcher" ]] || {
+  echo "regression runner is not executable" >&2
+  exit 2
+}
 args=(--source "$SOURCE_DIR" --suite "$suite" --sha "${HEAD_SHA:?HEAD_SHA is required}")
 if [[ "$suite" == embodied ]]; then
   models="${MODELS:-pi05_ddp}"

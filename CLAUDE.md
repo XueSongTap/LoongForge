@@ -81,18 +81,18 @@ Test configs: `tests/llm_vlm/configs/` (CI suite) and `tests/llm_vlm/optional_co
 bash tests/embodied/run.sh --list_models
 
 # Run the full regression suite on a chip
-bash tests/embodied/run.sh --chip A800
+bash tests/embodied/run.sh --chip a
 
 # Run selected targets
-bash tests/embodied/run.sh --chip A800 --models fastwam_ddp fastwam_ddp_zero1
+bash tests/embodied/run.sh --chip a --models fastwam_ddp fastwam_ddp_zero1
 
 # Collect baselines for the current chip
-bash tests/embodied/run.sh --chip A800 --auto_collect_baseline
+bash tests/embodied/run.sh --chip a --auto_collect_baseline
 
 # Artifacts are provisioned by the CI workflow/self-hosted runner before this step.
 
 # Validate commands/configuration without training
-bash tests/embodied/run.sh --chip A800 --dry_run
+bash tests/embodied/run.sh --chip a --dry_run
 ```
 
 Embodied test conventions:

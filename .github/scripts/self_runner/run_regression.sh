@@ -19,7 +19,7 @@ while [[ $# -gt 0 ]]; do
     --sha) sha="${2:-}"; shift 2 ;;
     --model) models="${2:-}"; shift 2 ;;
     --candidate-revision) candidate_revision="${2:-}"; shift 2 ;;
-    *) echo "unknown argument: $1" >&2; exit 2 ;;
+    *) printf '%s\n' 'argument: invalid' >&2; exit 2 ;;
   esac
 done
 
@@ -46,6 +46,17 @@ done
 : "${LOONGFORGE_RUNNER_LOG_ROOT:?LOONGFORGE_RUNNER_LOG_ROOT is required}"
 docker_bin="${DOCKER_BIN:-docker}"
 mkdir -p "$LOONGFORGE_RUNNER_LOG_ROOT" "$LOONGFORGE_HOST_OUTPUT_ROOT/resume"
+artifact_dir="$PWD/loongforge-artifacts"
+if [[ -L "$artifact_dir" || (-e "$artifact_dir" && ! -d "$artifact_dir") ]]; then
+  printf '%s\n' 'artifact: invalid directory' >&2
+  exit 2
+fi
+rm -rf "$artifact_dir"
+mkdir -p "$artifact_dir"
+
+# Validate the runner and default image before creating any container. A
+# candidate image was already preflighted by the workflow before it was built.
+"$script_dir/preflight.sh" "$suite" false >/dev/null
 
 image="${candidate_revision:-$LOONGFORGE_DEFAULT_IMAGE}"
 if [[ -n "$candidate_revision" ]]; then
@@ -55,26 +66,42 @@ container_name="loongforge-ci-${suite}-${sha:0:12}-$$"
 log_file="$LOONGFORGE_RUNNER_LOG_ROOT/${container_name}.log"
 result_file="$LOONGFORGE_RUNNER_LOG_ROOT/${container_name}.result.json"
 resume_state_file="$LOONGFORGE_CONTAINER_OUTPUT_ROOT/resume/${container_name}.json"
+artifact_result="$artifact_dir/${container_name}.result.json"
+artifact_log="$artifact_dir/${container_name}.log"
 
 status=1
 outputs_written=false
 write_outputs() {
   if [[ "$outputs_written" == false && -n "${GITHUB_OUTPUT:-}" ]]; then
-    printf 'result_json=%s\nlog_file=%s\n' "$result_file" "$log_file" >>"$GITHUB_OUTPUT"
+    printf '%s\n' 'artifact_dir=loongforge-artifacts' >>"$GITHUB_OUTPUT"
     outputs_written=true
   fi
 }
 cleanup() {
-  "$docker_bin" logs "$container_name" >>"$log_file" 2>&1 || true
+  mkdir -p "$artifact_dir"
+  if [[ ! -f "$log_file" ]]; then
+    docker_log_tmp="$artifact_dir/.docker-logs.$$"
+    if "$docker_bin" logs "$container_name" >"$docker_log_tmp" 2>&1; then
+      mv "$docker_log_tmp" "$log_file"
+    else
+      rm -f "$docker_log_tmp"
+    fi
+  fi
   "$docker_bin" rm -f "$container_name" >/dev/null 2>&1 || true
   if [[ -n "$candidate_revision" ]]; then
     "$docker_bin" image rm "$candidate_revision" >/dev/null 2>&1 || true
   fi
   if [[ ! -f "$result_file" ]]; then
-    printf '{"status":"failed","suite":"%s","sha":"%s","models":"%s","exit_code":%d,"log":"%s"}\n' \
-      "$suite" "$sha" "$models" "$status" "${container_name}.log" >"$result_file"
+    printf '%s\n' 'artifact: missing raw result' >&2
+    status=1
+  elif [[ ! -f "$log_file" ]]; then
+    printf '%s\n' 'artifact: missing raw log' >&2
+    status=1
+  else
+    python3 "$script_dir/../../../ci/redact_ci_artifact.py" --input "$result_file" --output "$artifact_result" || status=1
+    python3 "$script_dir/../../../ci/redact_ci_artifact.py" --input "$log_file" --output "$artifact_log" || status=1
   fi
-  "$script_dir/cleanup.sh" >>"$log_file" 2>&1 || true
+  "$script_dir/cleanup.sh" >/dev/null 2>&1 || true
   write_outputs
   exit "$status"
 }
@@ -92,7 +119,7 @@ if [[ "$suite" == embodied ]]; then
   }
   read -r -a model_args <<<"${models//,/ }"
   test_entry="bash tests/embodied/run.sh"
-  exec_args=(--chip "${LOONGFORGE_BASELINE_EMBODIED:-P6K}" --models "${model_args[@]}")
+  exec_args=(--chip "${LOONGFORGE_BASELINE_EMBODIED:-p}" --models "${model_args[@]}")
   extra_env=(
     -e "LOCAL_VLA_ARTIFACTS_ROOT=$LOONGFORGE_CONTAINER_DATA_ROOT"
     -e "EMBODIED_LOG_ROOT=$LOONGFORGE_CONTAINER_OUTPUT_ROOT/embodied"
@@ -106,21 +133,41 @@ else
   }
   test_entry="cd tests/llm_vlm && python3 main.py"
   read -r -a model_args <<<"${models//,/ }"
-  exec_args=(--models "${model_args[@]}" --chip "${LOONGFORGE_BASELINE_LLM_VLM:-A800}" \
+  exec_args=(--models "${model_args[@]}" --chip "${LOONGFORGE_BASELINE_LLM_VLM:-a}" \
     --tasks check_correctness_task check_precess_data_task --training_type pretrain sft \
     --node_nums 1 --gpu_nums 8 --check_loss_only)
   extra_env=()
 fi
 
-"$docker_bin" exec "${extra_env[@]}" \
+exec_command=( "$docker_bin" exec )
+if (( ${#extra_env[@]} )); then
+  exec_command+=( "${extra_env[@]}" )
+fi
+exec_command+=( \
   -e "PFS_PATH=$LOONGFORGE_CONTAINER_DATA_ROOT" \
   -e "TRAINING_LOG_PATH=$LOONGFORGE_CONTAINER_OUTPUT_ROOT" \
   -e "LOONGFORGE_TEST_SUITE=$suite" \
   -e "RESUME_STATE_FILE=$resume_state_file" \
   "$container_name" \
-  bash -lc "cd '$LOONGFORGE_CONTAINER_SOURCE' && $test_entry ${exec_args[*]@Q}" >>"$log_file" 2>&1
+  bash -lc "cd '$LOONGFORGE_CONTAINER_SOURCE' && $test_entry ${exec_args[*]@Q}" )
+"${exec_command[@]}" >>"$log_file" 2>&1
 status=$?
 set -e
+
+suite_results_copied=false
+if [[ "$suite" == embodied ]]; then
+  # Surface the regression framework's per-model results (loss/grad_norm
+  # baseline comparisons) so the workflow can report them on the pull
+  # request check run. The job concurrency group keeps parallel embodied
+  # runs off this runner, so the newest run directory is this container's.
+  newest_results="$(ls -1t "$LOONGFORGE_HOST_OUTPUT_ROOT"/embodied/run_*/results.json 2>/dev/null | head -1 || true)"
+  if [[ -n "$newest_results" && -f "$newest_results" ]]; then
+    if python3 "$script_dir/../../../ci/redact_ci_artifact.py" \
+        --input "$newest_results" --output "$artifact_dir/suite-results.json"; then
+      suite_results_copied=true
+    fi
+  fi
+fi
 
 result_status=failed
 [[ "$status" -eq 0 ]] && result_status=passed
@@ -128,5 +175,8 @@ models_json="${models//\\/\\\\}"
 models_json="${models_json//\"/\\\"}"
 printf '{"status":"%s","suite":"%s","sha":"%s","models":"%s","exit_code":%d,"log":"%s"}\n' \
   "$result_status" "$suite" "$sha" "$models_json" "$status" "${container_name}.log" >"$result_file"
+if [[ "$suite_results_copied" == true && -n "${GITHUB_OUTPUT:-}" ]]; then
+  printf '%s\n' 'suite_results=loongforge-artifacts/suite-results.json' >>"$GITHUB_OUTPUT"
+fi
 write_outputs
 exit "$status"

@@ -178,7 +178,7 @@ Step2:
 2. Set chip and enable baseline collection:
 
 ```bash
-chip="A800"
+chip="a"
 auto_collect_baseline=true
 ```
 

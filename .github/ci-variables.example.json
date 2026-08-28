@@ -1,5 +1,0 @@
-{
-  "CI_RUNNER_A": "[\"self-hosted\",\"A800\"]",
-  "CI_RUNNER_P": "[\"self-hosted\",\"P6K\"]",
-  "CI_REVIEW_RUNNER": "[\"self-hosted\",\"Linux\",\"X64\"]"
-}

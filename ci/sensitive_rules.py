@@ -229,7 +229,7 @@ RULES = [
         "title": "Internal hardware or product codename",
         "why": "Non-public chip/cluster/product codenames disclose the internal "
                "hardware fleet and roadmap.",
-        "pattern": r"(?i)\bBZZ\d?\b|\bP6K\b|\bDECK_STD\w*\b|\bqianfan\b|\bwenxin\b",
+        "pattern": r"(?i)\bBZZ\d?\b|\bP(?:6K)\b|\bDECK_STD\w*\b|\bqianfan\b|\bwenxin\b",
         "hint": "Use a public model designation, or parameterize it.",
     },
     {

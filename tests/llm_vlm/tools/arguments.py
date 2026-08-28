@@ -4,7 +4,6 @@
 """argument parser"""
 
 import argparse
-from tasks import SUPPORTED_TASKS
 from tools.config_manager import ConfigManager
 
 
@@ -110,7 +109,10 @@ def parse_args():
                         type=str,
                         nargs='+',
                         default=None,
-                        help=f"The model we need to test. Support formats: 'model_name' or 'subdir/model_name'. Available models: {', '.join(all_available_models[:10])}...")
+                        help=(
+                            f"The model we need to test. Support formats: 'model_name' or "
+                            f"'subdir/model_name'. Available models: {', '.join(all_available_models[:10])}..."
+                        ))
     parser.add_argument("--tasks",
                         type=str,
                         nargs='+',
@@ -173,19 +175,28 @@ def parse_args():
     parser.add_argument("--optional_subdir",
                         type=str,
                         default=None,
-                        help="Load all models from a specific subdirectory under optional_configs (e.g., 'internvl3.5', 'qwen2.5_vl').")
+                        help=(
+                            "Load all models from a specific subdirectory under optional_configs "
+                            "(e.g., 'internvl3.5', 'qwen2.5_vl')."
+                        ))
     parser.add_argument("--extra_models",
                         type=str,
                         nargs='*',
                         default=[],
-                        help="Additional models to run from optional_configs (e.g., 'internvl3.5/internvl3.5_30b_a3b').")
+                        help=(
+                            "Additional models to run from optional_configs "
+                            "(e.g., 'internvl3.5/internvl3.5_30b_a3b')."
+                        ))
     parser.add_argument("--check_loss_only",
                         action='store_true',
                         help="Only check lm_loss, ignore grad_norm.")
     parser.add_argument("--chip",
                         type=str,
                         default="default",
-                        help="Specify the chip type for baseline check (e.g., A800, H800). Default is 'default' which uses the root baseline directory.")
+                        help=(
+                            "Specify the chip type for baseline check (e.g., a, H800). "
+                            "Default is 'default' which uses the root baseline directory."
+                        ))
     parser.add_argument("--auto_collect_baseline",
                         action='store_true',
                         help="Automatically collect baseline from training logs and save into tests/baseline.")
@@ -198,7 +209,10 @@ def parse_args():
                         type=str,
                         default="skip_completed",
                         choices=["skip_completed", "skip_passed"],
-                        help="Resume policy: skip_completed skips all completed models; skip_passed skips only passed models.")
+                        help=(
+                            "Resume policy: skip_completed skips all completed models; "
+                            "skip_passed skips only passed models."
+                        ))
 
     args = parser.parse_args()
     print_args(args)

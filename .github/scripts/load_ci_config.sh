@@ -7,7 +7,7 @@
 
 config="${CI_CONFIG_PATH_IMAGE:-${CI_CONFIG_PATH:-}}"
 [[ -z "$config" ]] && return 0
-[[ -f "$config" ]] || { echo "CI image config not found: $config" >&2; exit 2; }
+[[ -f "$config" ]] || { printf '%s\n' 'config: missing' >&2; exit 2; }
 set -a
 # shellcheck disable=SC1090
 source "$config"

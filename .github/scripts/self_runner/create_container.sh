@@ -34,7 +34,7 @@ megatron_dir="$source_dir/third_party/Loong-Megatron"
   exit 2
 }
 "$docker_bin" container inspect "$container_name" >/dev/null 2>&1 && {
-  echo "container already exists: $container_name" >&2
+  printf '%s\n' 'container: exists' >&2
   exit 2
 }
 if [[ "${LOONGFORGE_PULL_IMAGE:-true}" == true ]]; then

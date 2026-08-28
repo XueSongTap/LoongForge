@@ -16,7 +16,6 @@ This directory contains the CI/CD workflows for LoongForge.
 | `build.yml` | Reusable workflow | Build sdist + wheel and run Python 3.12 import smoke |
 | `submodule-sync.yml` | repository dispatch / workflow dispatch + manual | Sync `third_party/Loong-Megatron` to its tracked branch and push the submodule pointer update |
 | `auto-label.yml` | Issue/PR open/edit | Auto-label issues and PRs by keyword matching |
-| `issue-notify.yml` | Issue opened | Notify Ruliu group when a new issue is opened |
 | `ok-to-test.yml` | Maintainer issue comment | Validate and dispatch `/ok-to-test` GPU regression |
 | `gpu-regression.yml` | Workflow dispatch | Run exact-SHA baseline regression for one model suite |
 | `gpu-invalidate.yml` | PR synchronize | Cancel stale suite GPU work after a new commit |
@@ -37,9 +36,9 @@ Maintainers can request a baseline regression by commenting on a pull request:
 ```
 
 The suite selects both the test collection and its self-hosted runner:
-`llm_vlm` runs on A800 and `embodied` runs on P6K. The `llm_vlm` suite is
-**temporarily unavailable** until the A800 runner is registered; only
-`embodied` currently accepts requests. With `--build-image`, that
+`llm_vlm` runs on a and `embodied` runs on p. The `embodied` suite is enabled
+by default; `llm_vlm` requires a registered runner and
+`CI_ENABLE_LLM_VLM=true` in the workflow environment. With `--build-image`, that
 same runner builds the PR's Dockerfile and immediately runs regression against
 the local candidate image. Without it, regression uses the runner's configured
 default image. Explicit models must belong to the selected suite and have a
@@ -71,9 +70,11 @@ and runner-local BuildKit secrets for APT, PyPI, and source mirrors. Candidate
 images are tagged locally with the PR number, head SHA, tree SHA, target, and
 candidate revision; this workflow never pushes or promotes them.
 
-Repository Variables are listed in `.github/ci-variables.example.json`. Every
-self-hosted runner provides its own `CI_CONFIG_PATH_IMAGE` environment variable;
-this is not a Repository Variable because runner filesystem roots may differ.
+Repository Variables are configured in GitHub Settings. The workflow expects
+`CI_RUNNER_A`, `CI_RUNNER_P`, `CI_REVIEW_RUNNER`, and
+`CLAUDE_REVIEW_MODEL`; `CLAUDE_CODE_EXECUTABLE` is optional. Every self-hosted
+runner provides its own `CI_CONFIG_PATH_IMAGE` environment variable; this is
+not a Repository Variable because runner filesystem roots may differ.
 
 Hooks must return nonzero on failure and must not print credentials, signed
 source URLs, runner-local filesystem paths, or physical accelerator details to
@@ -110,11 +111,3 @@ Required secrets:
 - `SUBMODULE_SYNC_APP_PRIVATE_KEY`
 
 The GitHub App behind those secrets must be able to push to the configured target branch. This workflow is separate from the PR `CI Gate` and is not a required merge check.
-
-## Ruliu Issue Notifications
-
-`issue-notify.yml` sends a Markdown message to a Ruliu group when a new GitHub Issue is opened. It runs on the self-hosted Linux runner because the Ruliu webhook host is only reachable from the internal network.
-
-Required secret:
-
-- `RULIU_ISSUE_WEBHOOK`: Ruliu group robot webhook URL for issue notifications.

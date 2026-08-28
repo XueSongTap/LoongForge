@@ -68,7 +68,7 @@ The following need to be prepared under `${EMBODIED_CI_ROOT}`:
 - **baseline** `tests/embodied/baseline/<chip>/<name>.json` (**critical**): missing baseline means a direct FAIL. Whichever chip you run on,
   first collect all models in the manifest on that chip:
   ```bash
-  chip=A800 auto_collect_baseline=true bash tests/embodied/run.sh
+  chip=a auto_collect_baseline=true bash tests/embodied/run.sh
   ```
 - **Auto-created**: `logs/` is generated automatically at runtime; no manual preparation needed.
 
@@ -118,35 +118,35 @@ runs the regression inside the container.
 
 ```bash
 # Full regression (inside the container)
-bash tests/embodied/run.sh --chip A800
+bash tests/embodied/run.sh --chip a
 
 # Run only one script (name from config/scripts.yaml) — choose either environment variable or command-line flag
-chip=A800 model_names="pi05_ddp" bash tests/embodied/run.sh
-bash tests/embodied/run.sh --chip A800 --models pi05_ddp
+chip=a model_names="pi05_ddp" bash tests/embodied/run.sh
+bash tests/embodied/run.sh --chip a --models pi05_ddp
 
 # Run multiple scripts
-chip=A800 model_names="pi05_ddp groot_n1_6_ddp" bash tests/embodied/run.sh
-bash tests/embodied/run.sh --chip A800 --models pi05_ddp groot_n1_6_ddp
+chip=a model_names="pi05_ddp groot_n1_6_ddp" bash tests/embodied/run.sh
+bash tests/embodied/run.sh --chip a --models pi05_ddp groot_n1_6_ddp
 
 # First-time baseline collection (no comparison, write the current result into tests/embodied/baseline/<chip>/)
-chip=A800 auto_collect_baseline=true bash tests/embodied/run.sh
-bash tests/embodied/run.sh --chip A800 --auto_collect_baseline
+chip=a auto_collect_baseline=true bash tests/embodied/run.sh
+bash tests/embodied/run.sh --chip a --auto_collect_baseline
 
 # Prepare the environment on-site (bos sync data), skipped by default, needs explicit enabling
-bash tests/embodied/run.sh --chip A800 --prepare
+bash tests/embodied/run.sh --chip a --prepare
 
 # Skip the grad_norm hard check and only enforce loss (both are checked by default)
-bash tests/embodied/run.sh --chip A800 --check_loss_only
+bash tests/embodied/run.sh --chip a --check_loss_only
 
 # Only print commands without training, to verify the pipeline
-chip=A800 dry_run=true bash tests/embodied/run.sh
-bash tests/embodied/run.sh --chip A800 --dry_run
+chip=a dry_run=true bash tests/embodied/run.sh
+bash tests/embodied/run.sh --chip a --dry_run
 
 # Stop at the first FAIL (skip the remaining models, useful for debugging)
-bash tests/embodied/run.sh --chip A800 --fail_fast
+bash tests/embodied/run.sh --chip a --fail_fast
 
 # List available names
-bash tests/embodied/run.sh --chip A800 --list_models
+bash tests/embodied/run.sh --chip a --list_models
 ```
 
 ## Parameter Interface
@@ -161,7 +161,7 @@ Every option supports two forms, with **CLI flags taking precedence over environ
 | Environment variable | CLI flag | Default | Description |
 |---|---|---|---|
 | `model_names` | `--models MODEL ...` | empty (=all) | Names to regress (must be in `config/scripts.yaml`); env-var form is a space-separated string, e.g. `model_names="pi05_ddp groot_n1_6_ddp"` |
-| `chip` | `--chip` | **required** | Chip model, `A800` / `P6K`; determines the baseline subdirectory `tests/embodied/baseline/<chip>/` |
+| `chip` | `--chip` | **required** | Chip model, `a` / `p`; determines the baseline subdirectory `tests/embodied/baseline/<chip>/` |
 | `TIMEOUT` | `--timeout` | `3600` | Per-script timeout (seconds); on timeout, SIGTERM→SIGKILL the process group |
 | `accuracy_relative_tolerance` | `--accuracy_relative_tolerance` | `0.02` | Per-iteration relative-error threshold for loss-type metrics (hard check) |
 | `performance_relative_tolerance` | `--performance_relative_tolerance` | `0.05` | Iteration time/throughput degradation threshold (soft check / used to write back the baseline) |

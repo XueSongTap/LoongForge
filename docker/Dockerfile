@@ -88,7 +88,7 @@ RUN --mount=type=secret,id=source_manifest,required=false \
         # FA3 (hopper variant) only for the hopper target: its setup.py
         # downloads an nvcc 12.6/12.8 toolchain that is incompatible with
         # the CUDA 13 base images used for ampere and blackwell, and the
-        # operator-maintained P6K images ship FA2 only.
+        # operator-maintained p images ship FA2 only.
         if [ "${COMPILE_ENV}" = "hopper" ]; then \
             cd "${flash_attn_dir}/hopper" && \
             MAX_JOBS=$(nproc) FLASH_ATTENTION_FORCE_BUILD=TRUE TORCH_CUDA_ARCH_LIST="${torch_cuda_arch_list}" \

@@ -27,7 +27,8 @@ Comparison strategy (aligned with the main framework's tests):
 - loss-type metrics: per-iteration relative-error hard check (failure if it exceeds accuracy_relative_tolerance)
 - grad_norm: hard check when check_loss_only=False
 - elapsed_time_ms / throughput: soft check (only warn, no failure, if it exceeds performance_relative_tolerance)
-- when the regression passes and performance overall improves beyond tolerance, automatically update the baseline's performance metrics to this run's better values
+- when the regression passes and performance overall improves beyond tolerance,
+  automatically update the baseline's performance metrics to this run's better values
   (see update_perf_baseline; accuracy metrics are never auto-updated)
 """
 
@@ -63,7 +64,7 @@ def load_baseline(chip, model_name, training_type):
     """Read the baseline records list for the given model.
 
     Args:
-        chip: chip model (e.g. A800 / P6K), which determines the baseline subdirectory.
+        chip: chip model (e.g. a / p), which determines the baseline subdirectory.
         model_name: model name, corresponding to the baseline file name (without .json).
         training_type: the top-level key of the baseline JSON, used to distinguish records of
             different training forms (e.g. train / pretrain / sft / lora) within the same file.
@@ -71,7 +72,8 @@ def load_baseline(chip, model_name, training_type):
             the parameter is kept as an extension point for coexisting multiple training forms later.
 
     Returns:
-        the records list under the corresponding training_type; returns None if the file does not exist or the key is missing.
+        the records list under the corresponding training_type; returns None if
+        the file does not exist or the key is missing.
     """
     path = baseline_path(chip, model_name)
     if not os.path.exists(path):
@@ -200,7 +202,7 @@ def compare(actual_records, baseline_records, accuracy_tol, performance_tol,
 
 def update_perf_baseline(chip, model_name, training_type,
                          actual_records, baseline_records, performance_tol):
-    """When the regression passes and performance improves, write the baseline's performance metrics back to this run's better values.
+    """Write improved performance metrics after a passing regression.
 
     Args:
         chip / model_name / training_type: same semantics as load_baseline;

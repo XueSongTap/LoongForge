@@ -16,14 +16,14 @@ while [[ $# -gt 0 ]]; do
     --tree-sha) tree_sha="$2"; shift 2 ;;
     --pr) pr_number="$2"; shift 2 ;;
     --source) source_dir="$2"; shift 2 ;;
-    *) echo "unknown builder argument: $1" >&2; exit 2 ;;
+    *) printf '%s\n' 'argument: invalid' >&2; exit 2 ;;
   esac
 done
 
 case "$target" in
   a) compile_env=ampere; target_code=a ;;
   p) compile_env=blackwell; target_code=p ;;
-  *) echo "unsupported image target (expected a or p): $target" >&2; exit 2 ;;
+  *) printf '%s\n' 'target: invalid' >&2; exit 2 ;;
 esac
 
 [[ -n "$head_sha" && -n "$tree_sha" && -n "$pr_number" && -d "$source_dir" ]] || {
@@ -33,6 +33,11 @@ esac
 
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/load_ci_config.sh"
+
+[[ "${LOONGFORGE_ALLOW_PR_IMAGE_BUILD:-false}" == true ]] || {
+  echo "candidate image builds are disabled on this runner" >&2
+  exit 2
+}
 
 short_head="${head_sha:0:12}"
 short_tree="${tree_sha:0:12}"
@@ -47,7 +52,7 @@ candidate_retention_hours="${LOONGFORGE_CANDIDATE_RETENTION_HOURS:-24}"
 }
 
 source_dockerfile="${IMAGE_DOCKERFILE:-$source_dir/docker/Dockerfile}"
-[[ -f "$source_dockerfile" ]] || { echo "Dockerfile not found: $source_dockerfile" >&2; exit 2; }
+[[ -f "$source_dockerfile" ]] || { printf '%s\n' 'dockerfile: missing' >&2; exit 2; }
 context_dir="$(mktemp -d)"
 mkdir -p "$context_dir/LoongForge"
 tar -C "$source_dir" \
@@ -128,10 +133,12 @@ values = sorted(
     reverse=True,
 )
 url = re.compile(r"https?://[^\s\"<>]+")
+absolute_path = re.compile(r"(?<![A-Za-z0-9_])/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._@+%=-]+")
 for line in sys.stdin:
     for value in values:
         line = line.replace(value, "[runner-local value]")
-    sys.stderr.write(url.sub("[redacted-url]", line))
+    line = url.sub("[redacted-url]", line)
+    sys.stderr.write(absolute_path.sub("[redacted-path]", line))
 '
 }
 

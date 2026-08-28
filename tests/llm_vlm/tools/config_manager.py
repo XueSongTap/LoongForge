@@ -3,15 +3,14 @@
 
 """config manager"""
 
-import os, json
-import yaml, re
-from string import Template
-from copy import deepcopy
-from typing import Dict, List, Any, TYPE_CHECKING, Optional, Tuple
-from tools.color_logger import create_color_logger
+import json
+import os
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
-if TYPE_CHECKING:
-    from tasks import BaseTask
+import yaml
+
+from tools.color_logger import create_color_logger
 
 logger = create_color_logger(name=__name__)
 
@@ -58,7 +57,8 @@ class ConfigManager(object):
                 
                 config = self.load_config(actual_configs_dir, yaml_filename)
 
-                if ConfigManager.get_model_name(config) in [m.split("/")[-1] if "/" in m else m for m in self.args.models]:
+                model_names = [m.split("/")[-1] if "/" in m else m for m in self.args.models]
+                if ConfigManager.get_model_name(config) in model_names:
                     tasks = ConfigManager.get_tasks(config)
                     for task in tasks:
                         if tasks not in self.args.tasks:
@@ -96,7 +96,10 @@ class ConfigManager(object):
                 baseline_data = baseline_data[training_type]
             else:
                 available_keys = list(baseline_data.keys())
-                raise ValueError(f"training_type '{training_type}' not specified or not found in {json_path}, available training_types: {available_keys}")
+                raise ValueError(
+                    f"training_type '{training_type}' not specified or not found in "
+                    f"{json_path}, available training_types: {available_keys}"
+                )
         
         # Extract required data in order of iteration
         lm_loss_list = [item["lm_loss"] for item in baseline_data]
@@ -125,7 +128,7 @@ class ConfigManager(object):
         Args:
             model_config: Model configuration dictionary
             model_name: Model name
-            chip: Chip type (e.g. A800, H800)
+            chip: Chip type (e.g. a, H800)
         Returns:
             Full path to the baseline file
         """
@@ -188,33 +191,6 @@ class ConfigManager(object):
         return baseline_file
 
     @staticmethod
-    def get_baseline_file_path_for_write(model_config, model_name, chip="default"):
-        """
-        Get baseline file path for writing. Creates parent directories if needed.
-        """
-        baseline_path = model_config.get("BASELINE_PATH")
-        if baseline_path and os.path.isdir(baseline_path):
-            baseline_file = os.path.join(baseline_path, f"{model_name}.json")
-        else:
-            config_source = model_config.get("_config_source", {})
-            config_dir = config_source.get("dir", "")
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            baseline_root = os.path.join(current_dir, "..", "baseline")
-
-            if "optional_configs" in config_dir:
-                base_path = os.path.join(baseline_root, "optional")
-            else:
-                base_path = os.path.join(baseline_root, "default")
-
-            if chip and chip != "default":
-                baseline_file = os.path.join(base_path, chip, f"{model_name}.json")
-            else:
-                baseline_file = os.path.join(base_path, f"{model_name}.json")
-
-        os.makedirs(os.path.dirname(baseline_file), exist_ok=True)
-        return baseline_file
-
-    @staticmethod
     def get_baseline_data(self_unused, model_config, model_name, training_type=None, chip="default"):
         """Get baseline data (for BaseTask calls)
         
@@ -243,7 +219,10 @@ class ConfigManager(object):
                 return data[training_type]
             else:
                 available_keys = list(data.keys())
-                raise ValueError(f"training_type '{training_type}' not specified or not found in {baseline_file}, available training_types: {available_keys}")
+                raise ValueError(
+                    f"training_type '{training_type}' not specified or not found in "
+                    f"{baseline_file}, available training_types: {available_keys}"
+                )
         
         raise ValueError(f"Invalid JSON structure in {baseline_file}")
 
@@ -262,7 +241,8 @@ class ConfigManager(object):
         return formatted_data
 
     def load_config(self, configs_dir: str, model_file: str) -> Dict[Any, Any]:
-        # Prioritize using common.yaml in the current directory, if it does not exist, use the one in the main configuration directory
+        # Prefer common.yaml in the current directory, falling back to the main
+        # configuration directory when it is absent.
         common_config_file = os.path.join(configs_dir, "common.yaml")
         if not os.path.exists(common_config_file):
             # Fallback to common.yaml in the main configuration directory
@@ -328,7 +308,10 @@ class ConfigManager(object):
                                 formatted_data = self.format_baseline_data_for_yaml(baseline_data)
                                 # Update configuration data
                                 step_data.update(formatted_data)
-                                logger.info(f"Successfully loaded {training_type} baseline data from JSON file {baseline_json_path} dynamically")
+                                logger.info(
+                                    f"Successfully loaded {training_type} baseline data from "
+                                    f"JSON file {baseline_json_path} dynamically"
+                                )
 
 
         return config

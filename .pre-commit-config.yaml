@@ -30,3 +30,18 @@ repos:
           - --use-current-year
           - --detect-license-in-X-top-lines=10
           - --no-extra-eol
+
+  # The Go language hook builds the pinned gitleaks release in pre-commit's
+  # isolated environment, so developers do not need a system gitleaks binary.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: sensitive-scan
+        name: Sensitive information scan
+        entry: python3 ci/sensitive_scan.py --ci-summary --paths
+        language: system
+        pass_filenames: true

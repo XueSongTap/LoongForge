@@ -67,7 +67,7 @@ TIMEOUT=3600
 accuracy_relative_tolerance=0.02
 performance_relative_tolerance=0.05
 check_loss_only=true
-chip="A800"
+chip="a"
 # auto_collect_baseline=true
 
 # Test tasks

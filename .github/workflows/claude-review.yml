@@ -42,7 +42,9 @@ jobs:
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)
       )
     runs-on: ${{ fromJSON(vars.CI_REVIEW_RUNNER) }}
-    timeout-minutes: 30
+    # Self-hosted runners may need several minutes to install the pinned Claude
+    # binary through the runner proxy. Keep enough room for the actual review.
+    timeout-minutes: 45
     steps:
       - name: Trust workspace (self-hosted runner)
         # The runner process runs as root but _work/ may contain files created
@@ -191,11 +193,23 @@ jobs:
         env:
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
           HOME: ${{ runner.temp }}/runner-home
+          # The gateway behind ANTHROPIC_BASE_URL has no channel for the CLI's
+          # default claude-* model IDs. Pass the review model through every
+          # resolution path the CLI and action use, so the request cannot fall
+          # back to an unmapped default (which the gateway rejects with 503).
+          ANTHROPIC_MODEL: ${{ vars.CLAUDE_REVIEW_MODEL }}
+          ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.CLAUDE_REVIEW_MODEL }}
+          ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.CLAUDE_REVIEW_MODEL }}
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.CLAUDE_REVIEW_MODEL }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ github.token }}
           base_branch: ${{ steps.pr.outputs.base_ref }}
           track_progress: false
+          # Set this repository variable only when the executable is already
+          # installed on every runner selected by CI_REVIEW_RUNNER. An empty
+          # value keeps the action's pinned automatic installation path.
+          path_to_claude_code_executable: ${{ vars.CLAUDE_CODE_EXECUTABLE || '' }}
           prompt: |
             /code-review
 
@@ -217,10 +231,17 @@ jobs:
             Return the one top-level verdict required by the Skill in the
             verdict_comment structured-output field; the workflow will post it.
             Do not modify files, commits, branches, labels, or PR state.
+          # claude-code-action (v1.0.189) joins this value onto one line after
+          # its own --mcp-config argument and then re-parses the result with a
+          # shell tokenizer. A '#' anywhere in the string opens a shell comment
+          # that swallows every argument after it (the CLI then falls back to
+          # its default model, which the gateway has no channel for). Keep this
+          # block free of '#' characters; document it here in YAML instead.
+          # The 45-minute job timeout is the hard limit. In this provider,
+          # --max-turns can reject an otherwise successful result post hoc.
+          # CLAUDE_REVIEW_MODEL must be an ID accepted by ANTHROPIC_BASE_URL.
           claude_args: |
-            # The 30-minute job timeout is the hard limit. In this provider,
-            # --max-turns can reject an otherwise successful result post hoc.
-            --model "${{ vars.CLAUDE_REVIEW_MODEL || 'Claude Sonnet 4.6' }}"
+            --model "${{ vars.CLAUDE_REVIEW_MODEL }}"
             --permission-mode dontAsk
             --setting-sources user
             --strict-mcp-config
@@ -229,6 +250,40 @@ jobs:
             --json-schema '{"type":"object","properties":{"verdict_comment":{"type":"string"}},"required":["verdict_comment"],"additionalProperties":false}'
             --allowedTools "Skill(code-review),Read,Grep,Glob,mcp__github_inline_comment__create_inline_comment,mcp__github_ci__get_ci_status,mcp__github_ci__get_workflow_run_details,mcp__github_ci__download_job_log"
             --disallowedTools "Edit,Write,NotebookEdit,Bash,WebFetch,WebSearch"
+
+      - name: Report Claude execution diagnostics
+        if: ${{ always() && steps.claude.outcome == 'failure' }}
+        shell: bash
+        env:
+          EXECUTION_FILE: ${{ runner.temp }}/claude-execution-output.json
+        run: |
+          if [ ! -f "$EXECUTION_FILE" ]; then
+            echo "::warning::Claude execution metadata was not written"
+            exit 0
+          fi
+          # Keep public logs to stable SDK metadata. The execution file also
+          # contains model/tool content and must not be dumped to the log.
+          node - "$EXECUTION_FILE" <<'NODE'
+          const fs = require('node:fs');
+          const file = process.argv[2];
+          const messages = JSON.parse(fs.readFileSync(file, 'utf8'));
+          const results = messages.filter((message) => message?.type === 'result');
+          if (!results.length) {
+            console.log('Claude result metadata: unavailable');
+            process.exit(0);
+          }
+          for (const result of results) {
+            console.log(JSON.stringify({
+              subtype: result.subtype,
+              is_error: result.is_error,
+              num_turns: result.num_turns,
+              duration_ms: result.duration_ms,
+              duration_api_ms: result.duration_api_ms,
+              api_error_status: result.api_error_status ?? null,
+              terminal_reason: result.terminal_reason ?? null,
+            }));
+          }
+          NODE
 
       - name: Post top-level verdict
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0

@@ -144,9 +144,10 @@ Every PR runs the following checks through the `CI Gate` GitHub Actions workflow
 | CI Gate | All blocking CPU checks below | Open or update a PR |
 | PR Title Check | Title matches `[<modules>] <type>: <description>` | n/a — edit the PR title |
 | License Header | Newly added `.py/.sh/.cu/.cpp/.h` files have the SPDX Apache-2.0 header | `pre-commit run spdx-check --files <path>` |
-| Secret Scan | gitleaks finds no leaked secrets in new commits | `gitleaks detect --config .gitleaks.toml` |
+| Secret Scan | gitleaks finds no leaked secrets in staged files locally and new commits in CI | `pre-commit run gitleaks` (staged files); CI scans the PR commit range |
 | Ruff | New or modified Python files pass Ruff (`E4,E7,E9,E501,F,S506`) | `ruff check <changed-python-files>` |
 | Build | `python -m build` and wheel import smoke succeed on Python 3.12 | `python -m build --sdist --wheel --outdir dist/` |
+| Sensitive Scan | No blocking internal-only information is present in changed files | `pre-commit run sensitive-scan --all-files` |
 | Workflow Lint | GitHub Actions files pass `actionlint`, YAML parsing, and CI helper contract tests | `actionlint && node --test tests/test_ci_helpers.js` |
 
 `workflow_dispatch` on `ci-gate.yml` is diagnostic and publishes a final job
@@ -170,16 +171,21 @@ named `manual-ci-gate`. Only the automatically triggered PR job is named
 ```bash
 pip install pre-commit
 pre-commit install
-pre-commit run --all-files   # optional
+pre-commit run --all-files
 ```
 
-Once installed, the SPDX header check and other hygiene hooks run automatically on `git commit`.
+Once installed, the hygiene, SPDX, gitleaks, and sensitive-information hooks
+run automatically on `git commit`. The first gitleaks run may take a few
+minutes while pre-commit builds the pinned release in its isolated Go
+environment. The gitleaks hook scans staged content; the sensitive-information
+hook scans the files passed by pre-commit. These hooks complement, but do not
+replace, the PR commit-range and full CI scans.
 
 ### GPU validation
 
 Maintainers may request GPU validation with `/ok-to-test --suite llm_vlm|embodied`.
-The suite selects the corresponding self-hosted runner (`llm_vlm` on A800 and
-`embodied` on P6K). The default run uses the suite's known-good baseline;
+The suite selects the corresponding self-hosted runner (`llm_vlm` on a and
+`embodied` on p). The default run uses the suite's known-good baseline;
 `--model` requests a baseline-backed subset for additional validation. Add
 `--build-image` to build the PR Dockerfile on that same runner and run the
 regression against the local candidate image. Runner and machine configuration

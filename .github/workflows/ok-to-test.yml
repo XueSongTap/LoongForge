@@ -37,6 +37,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           REQUEST: ${{ steps.request.outputs.payload }}
+          ENABLE_LLM_VLM: ${{ vars.CI_ENABLE_LLM_VLM }}
         with:
           script: |
             const request = JSON.parse(process.env.REQUEST);
@@ -46,14 +47,8 @@ jobs:
               return;
             }
 
-            // TEMPORARY: the A800 regression runner is not registered yet.
-            // Reject llm_vlm requests with an explicit message until it is.
-            // Remove this block when the A800 self-hosted runner goes live.
-            if (request.suite !== 'embodied') {
-              core.setFailed(
-                'llm_vlm GPU regression is temporarily unavailable: the A800 runner is not set up yet. ' +
-                  'Only the embodied suite (P6K) is currently supported.',
-              );
+            if (request.suite === 'llm_vlm' && process.env.ENABLE_LLM_VLM !== 'true') {
+              core.setFailed('the requested GPU suite is disabled by repository configuration');
               return;
             }
 
@@ -69,7 +64,10 @@ jobs:
             core.setOutput('head_sha', pull.head.sha);
             core.setOutput('base_ref', pull.base.ref);
             core.setOutput('suite', request.suite);
-            core.setOutput('models', request.models.join(','));
+            const models = request.models.length
+              ? request.models
+              : [request.suite === 'embodied' ? 'pi05_ddp' : 'deepseek_v2_lite'];
+            core.setOutput('models', models.join(','));
             core.setOutput('build_image', String(request.build_image));
       - name: Validate models against suite manifest
         uses: ./.github/actions/validate-models
@@ -78,6 +76,7 @@ jobs:
           models: ${{ steps.context.outputs.models }}
           repository: ${{ steps.context.outputs.head_repo }}
           ref: ${{ steps.context.outputs.head_sha }}
+          baseline_alias: ${{ steps.context.outputs.suite == 'embodied' && 'p' || 'a' }}
       - name: Dispatch immutable revision
         uses: actions/github-script@v7
         env:
@@ -99,7 +98,7 @@ jobs:
             const { data: check } = await github.rest.checks.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              name: 'ci-gate',
+              name: 'gpu-regression',
               head_sha: process.env.HEAD_SHA,
               external_id: `loongforge-gpu:${process.env.PR_NUMBER}:${process.env.HEAD_SHA}`,
               status: 'in_progress',
