@@ -25,6 +25,7 @@ QWEN3_PROJECTOR_CONFIGS = {
         "qwen3_5_397b_a17b.yaml",
     ),
     "qwen3.6": ("qwen3_6_27b.yaml", "qwen3_6_35b_a3b.yaml"),
+    "qwen3.8": ("qwen3_8_27b.yaml",),
 }
 
 

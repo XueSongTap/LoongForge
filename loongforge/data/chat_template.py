@@ -928,6 +928,18 @@ _register_chat_template(
 )
 
 _register_chat_template(
+    name="qwen3.8-hf",
+    cls=HFChatTemplate,
+    chat_template=_read_builtin_chat_template("qwen3_8_hf_training.jinja"),
+    chat_template_kwargs={
+        "enable_thinking": False,
+        "reasoning_effort": "low",
+        "preserve_thinking": True,
+    },
+    mm_plugin=Qwen3VLPlugin(image_token="<|image_pad|>", video_token="<|video_pad|>"),
+)
+
+_register_chat_template(
     name="qwen3.6-hf",
     cls=HFChatTemplate,
     chat_template=_read_builtin_chat_template("qwen3_6_hf_training.jinja"),

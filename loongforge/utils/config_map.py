@@ -276,6 +276,12 @@ MODEL_CONFIG_REGISTRY = {
         "config_name": "qwen3_6_35b_a3b",
     },
 
+    # qwen3.8
+    "qwen3.8-27b": {
+        "config_path": "configs/models/qwen3.8",
+        "config_name": "qwen3_8_27b",
+    },
+
     # kimi-k2.x
     "kimi-k2.5": {
         "config_path": "configs/models/kimi_k2.5",
@@ -414,10 +420,6 @@ MODEL_CONFIG_REGISTRY = {
     "ernie4.5-vl-28b-a3b": {
         "config_path": "configs/models/ernie4.5vl",
         "config_name": "ernie4_5_vl_28b_a3b",
-    },
-    "llava-onevision-1.5-4b": {
-        "config_path": "configs/models/llava_onevision",
-        "config_name": "llava_onevision_1_5_4b",
     },
     "glm5": {
         "config_path": "configs/models/glm5",
