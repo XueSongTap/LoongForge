@@ -34,32 +34,29 @@ Note: `setup_env.py` only handles TransformerEngine. Megatron-LM (Loong-Megatron
 
 ### Build Package
 ```bash
-sh build.sh    # Creates output tarball
+python -m build --sdist --wheel --outdir dist/
 ```
 
 ## Running Tests
 
-E2E tests use a custom YAML-driven framework (`tests/main.py`), not pytest.
+E2E tests use a custom YAML-driven framework (`tests/llm_vlm/main.py`), not pytest.
+
+The entry script does NOT download artifacts. Provision the datasets, HuggingFace base
+models, and pre-converted checkpoints referenced by the selected configs first, then run:
 
 ```bash
-# Download test datasets first
-bash tests/download_datasets.sh
-
-# Run default CI test suite (all models in tests/configs/)
-bash tests/main_start.sh
-
-# Run optional regression tests (tests/optional_configs/)
-bash tests/main_start.sh --optional
+# Run the default CI suite (all models in tests/llm_vlm/configs/)
+bash tests/llm_vlm/main_start.sh
 ```
 
 ### Running a Single Model Test
 
-Edit variables in `tests/main_start.sh`:
+Edit variables in `tests/llm_vlm/main_start.sh`:
 ```bash
-# Run one model from tests/configs/
+# Run one model from tests/llm_vlm/configs/
 model_names="qwen3_14b"
 
-# Run one model from tests/optional_configs/
+# Run one model from tests/llm_vlm/optional_configs/
 model_names="deepseek_v2/deepseek_v2_lite"
 include_optional=true
 
@@ -69,7 +66,55 @@ optional_subdir="internvl2.5"
 include_optional=true
 ```
 
-Test configs: `tests/configs/` (CI suite) and `tests/optional_configs/` (regression, organized by model family). Each YAML defines model params and multi-step `scenarios` (checkpoint conversion + training).
+Test configs: `tests/llm_vlm/configs/` (CI suite) and `tests/llm_vlm/optional_configs/` (regression, organized by model family). Each YAML defines model params and multi-step `scenarios` (checkpoint conversion + training).
+
+### Embodied/VLA Regression Tests
+
+`tests/embodied/` is the end-to-end regression suite for training scripts under
+`loongforge/embodied/` and `examples/embodied/`. Its entry point is
+`tests/embodied/run.sh`; execution, metric parsing, and baseline comparison are owned by
+`tests/embodied/cli.py`. Regression targets are registered in
+`tests/embodied/config/scripts.yaml` and run serially in manifest order.
+
+```bash
+# List available embodied regression targets
+bash tests/embodied/run.sh --list_models
+
+# Run the full regression suite on a chip
+bash tests/embodied/run.sh --chip a
+
+# Run selected targets
+bash tests/embodied/run.sh --chip a --models fastwam_ddp fastwam_ddp_zero1
+
+# Collect baselines for the current chip
+bash tests/embodied/run.sh --chip a --auto_collect_baseline
+
+# Artifacts are provisioned by the CI workflow/self-hosted runner before this step.
+
+# Validate commands/configuration without training
+bash tests/embodied/run.sh --chip a --dry_run
+```
+
+Embodied test conventions:
+
+- `tests/embodied/config/env.sh` centralizes `EMBODIED_CI_ROOT`,
+  `LOCAL_VLA_ARTIFACTS_ROOT`, log, and baseline paths. Prefer environment
+  overrides or this file when moving the suite to another machine.
+- Add every new training script to `tests/embodied/config/scripts.yaml`; the manifest
+  path is relative to `examples/embodied/`. Add a baseline under
+  `tests/embodied/baseline/<chip>/<name>.json` for each supported chip.
+- The executor injects `OUTPUT_DIR`, `TENSORBOARD_DIR`, and model-specific environment
+  variables. Training scripts should expose environment overrides for data, checkpoints,
+  caches, and output paths instead of relying on the executor to rewrite training args.
+- Loss and `grad_norm` are hard-checked by default. Missing baselines, non-zero training
+  exits, insufficient metrics, NaN/Inf, or skipped iterations fail the regression.
+  Performance regressions warn by default; clear performance improvements may update the
+  baseline.
+- `--auto_collect_baseline` collects results without comparison. Baselines are chip-specific
+  and must not be reused across different hardware without validation.
+- For changes to video/action preprocessing, text-embedding caches, or distributed strategy,
+  run the affected target's `--dry_run` first and then the real regression when artifacts
+  and hardware are available.
 
 ## Training Launch Pattern
 
@@ -100,6 +145,8 @@ Key arguments: `--model-name` (maps to config via `config_map.py`) or `--config-
 - **`train/pretrain/`** — Pretrain implementations for LLM and VLM.
 - **`train/sft/`** — SFT implementations for LLM, VLM, InternVL, ERNIE.
 - **`train/custom/`** — Custom model trainers (e.g., WAN diffusion, Pi0.5 VLA).
+- **`embodied/`** — Embodied/VLA training framework, including robot datasets, model
+  implementations, preprocessing, and DDP/FSDP/ZeRO launch integrations.
 
 ### Model System: `loongforge/models/`
 

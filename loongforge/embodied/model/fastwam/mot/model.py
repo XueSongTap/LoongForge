@@ -18,14 +18,39 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
-from loongforge.embodied.model.fastwam.wan.dit import flash_attention, modulate, rope_apply
+from loongforge.embodied.model.fastwam.utils.norm_modulate import triton_norm_modulate
+from loongforge.embodied.model.fastwam.wan.dit import flash_attention, rope_apply
 
 logger = logging.getLogger(__name__)
+
+
+def _norm_modulate(norm: nn.LayerNorm, x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor):
+    """Fuse affine-free LayerNorm with timestep scale/shift modulation.
+
+    `_split_modulation` always yields dim-3 modulation: [B, 1, D] for per-block
+    timesteps and [B, S, D] for per-token timesteps.
+
+    Args:
+        norm: Affine-free `nn.LayerNorm` whose epsilon drives the fused kernel.
+        x: Hidden states, shape [B, S, D].
+        shift: Modulation shift, shape [B, 1, D] or [B, S, D].
+        scale: Modulation scale, shape [B, 1, D] or [B, S, D].
+
+    Returns:
+        Normalized and modulated hidden states, shape [B, S, D].
+    """
+    # expand_as is a zero-copy view; stride 0 over sequence broadcasts modulation.
+    return triton_norm_modulate(
+        x,
+        scale.expand_as(x),
+        shift.expand_as(x),
+        float(norm.eps),
+    )
 
 
 class MoT(nn.Module):
@@ -35,6 +60,9 @@ class MoT(nn.Module):
         self,
         mixtures: Dict[str, nn.Module],
         mot_checkpoint_mixed_attn: bool = True,
+        drop_all_true_cross_attn_mask: bool = False,
+        compile_mot_blocks: str = "none",
+        compile_dynamic: bool = False,
     ):
         """Initialize expert modules and validate shared transformer geometry."""
         super().__init__()
@@ -46,6 +74,10 @@ class MoT(nn.Module):
         self.mixtures = nn.ModuleDict(mixtures)
         self.expert_order = list(self.mixtures.keys())
         self.mot_checkpoint_mixed_attn = mot_checkpoint_mixed_attn
+        self.drop_all_true_cross_attn_mask = drop_all_true_cross_attn_mask
+        # (expert, mask shape) -> is the mask all True. Filled on first sight so the
+        # device->host sync of `mask.all()` happens once per shape, not per step.
+        self._all_true_ctx_mask: Dict[tuple, bool] = {}
         if mot_checkpoint_mixed_attn:
             logger.info(
                 "Using gradient checkpointing for mixture attention. This will save memory but use more computation."
@@ -76,6 +108,26 @@ class MoT(nn.Module):
         for name in self.expert_order:
             expert = self.mixtures[name]
             logger.info(f"  Expert '{name}': num_params={sum(p.numel() for p in expert.parameters()) / 1e9:.2f} B")
+
+        if compile_mot_blocks != "none":
+            # The two units around mixed attention are the compilable part of a layer:
+            # every shape in them is fixed by the config, and mixed attention itself
+            # stays eager (a single SDPA call, optionally checkpointed). They are
+            # switched separately because they fragment very differently: `pre` holds
+            # two TE RMSNorms plus two Triton RoPE calls that Dynamo cannot trace,
+            # while `post` holds the FFN and gate/modulate chain.
+            if compile_mot_blocks in ("pre", "both"):
+                self._build_expert_attention_io = torch.compile(
+                    self._build_expert_attention_io, dynamic=compile_dynamic
+                )
+            if compile_mot_blocks in ("post", "both"):
+                self._apply_expert_post_block = torch.compile(
+                    self._apply_expert_post_block, dynamic=compile_dynamic
+                )
+            logger.info(
+                "[compile] torch.compile on MoT blocks=%s (dynamic=%s)",
+                compile_mot_blocks, compile_dynamic,
+            )
 
     @staticmethod
     def _split_modulation(block, t_mod: torch.Tensor):
@@ -143,7 +195,7 @@ class MoT(nn.Module):
                     context_mask = context_mask.unsqueeze(1)
                 x = x + block.cross_attn(block.norm3(x), context, ctx_mask=context_mask)
 
-        mlp_input = modulate(block.norm2(x), shift_mlp, scale_mlp)
+        mlp_input = _norm_modulate(block.norm2, x, shift_mlp, scale_mlp)
         x = block.gate(x, gate_mlp, block.ffn(mlp_input))
         return x
 
@@ -152,7 +204,7 @@ class MoT(nn.Module):
         expert,
         block,
         x: torch.Tensor,
-        freqs: torch.Tensor,
+        freqs: Tuple[torch.Tensor, torch.Tensor],
         t_mod: torch.Tensor,
     ) -> tuple[
         torch.Tensor,
@@ -172,7 +224,7 @@ class MoT(nn.Module):
                 `use_gradient_checkpointing`.
             block: Transformer block for current layer (`expert.blocks[layer_idx]`).
             x: Current expert tokens, shape [B, S, D].
-            freqs: RoPE frequencies aligned with token sequence, shape [S, 1, rope_dim].
+            freqs: RoPE `(cos, sin)` tables aligned with token sequence, each [S, rope_dim // 2].
             t_mod: Time modulation tensor for this expert/layer.
 
         Returns:
@@ -187,7 +239,7 @@ class MoT(nn.Module):
             use_gradient_checkpointing: Whether this expert enables checkpointing.
         """
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self._split_modulation(block, t_mod)
-        attn_input = modulate(block.norm1(x), shift_msa, scale_msa)
+        attn_input = _norm_modulate(block.norm1, x, shift_msa, scale_msa)
 
         q = block.self_attn.norm_q(block.self_attn.q(attn_input))
         k = block.self_attn.norm_k(block.self_attn.k(attn_input))
@@ -284,7 +336,7 @@ class MoT(nn.Module):
     def prefill_video_cache(
         self,
         video_tokens: torch.Tensor,
-        video_freqs: torch.Tensor,
+        video_freqs: Tuple[torch.Tensor, torch.Tensor],
         video_t_mod: torch.Tensor,
         video_context_payload: Optional[dict],
         video_attention_mask: torch.Tensor,
@@ -293,7 +345,7 @@ class MoT(nn.Module):
 
         Args:
             video_tokens: Video tokens before layer 0, shape [B, Sv, D].
-            video_freqs: Video RoPE frequencies, shape [Sv, 1, rope_dim].
+            video_freqs: Video RoPE `(cos, sin)` tables, each [Sv, rope_dim // 2].
             video_t_mod: Video time modulation tensor.
             video_context_payload: Optional dict for video cross-attention.
                 - `context`: encoder states [B, L, D]
@@ -370,7 +422,7 @@ class MoT(nn.Module):
     def forward_action_with_video_cache(
         self,
         action_tokens: torch.Tensor,
-        action_freqs: torch.Tensor,
+        action_freqs: Tuple[torch.Tensor, torch.Tensor],
         action_t_mod: torch.Tensor,
         action_context_payload: Optional[dict],
         video_kv_cache: list[dict[str, torch.Tensor]],
@@ -381,7 +433,7 @@ class MoT(nn.Module):
 
         Args:
             action_tokens: Action tokens before layer 0, shape [B, Sa, D].
-            action_freqs: Action RoPE frequencies, shape [Sa, 1, rope_dim].
+            action_freqs: Action RoPE `(cos, sin)` tables, each [Sa, rope_dim // 2].
             action_t_mod: Action time modulation tensor.
             action_context_payload: Optional dict for action cross-attention.
                 - `context`: encoder states [B, L, D]
@@ -471,11 +523,40 @@ class MoT(nn.Module):
             )
         return x
 
+    def _drop_all_true_mask(self, name: str, payload: Optional[dict]) -> Optional[dict]:
+        """Return `payload` with an all-True cross-attention mask replaced by None.
+
+        A bool mask that is True everywhere is a no-op for attention, but SDPA still
+        takes its masked code path for it. Dropping it lets SDPA pick the flash
+        kernel. Only all-True masks are dropped; the group-causal action masks built
+        by `WanVideoDiT` are left untouched.
+        """
+        if not payload:
+            return payload
+        mask = payload.get("mask")
+        if not isinstance(mask, torch.Tensor) or mask.dtype != torch.bool:
+            return payload
+
+        key = (name, tuple(mask.shape))
+        all_true = self._all_true_ctx_mask.get(key)
+        if all_true is None:
+            all_true = bool(mask.all())
+            self._all_true_ctx_mask[key] = all_true
+            logger.info(
+                "Cross-attention mask for expert '%s' with shape %s is all_true=%s -> %s",
+                name, tuple(mask.shape), all_true, "dropped" if all_true else "kept",
+            )
+        if not all_true:
+            return payload
+        stripped = dict(payload)
+        stripped["mask"] = None
+        return stripped
+
     def forward(
         self,
         embeds_all: Dict[str, torch.Tensor],
         attention_mask: torch.Tensor,
-        freqs_all: Dict[str, torch.Tensor],
+        freqs_all: Dict[str, Tuple[torch.Tensor, torch.Tensor]],
         context_all: Dict[str, Optional[dict]],
         t_mod_all: Dict[str, torch.Tensor],
     ):
@@ -496,6 +577,9 @@ class MoT(nn.Module):
             raise ValueError(f"`attention_mask` must be square, got shape {tuple(attention_mask.shape)}")
 
         tokens_all = {k: v for k, v in embeds_all.items()}
+
+        if self.drop_all_true_cross_attn_mask:
+            context_all = {k: self._drop_all_true_mask(k, v) for k, v in context_all.items()}
 
         for layer_idx in range(self.num_layers):
             q_chunks = []

@@ -42,6 +42,7 @@ from typing import (
 from loongforge.utils.constants import DataRoles
 from .mm_plugin import MMPlugin, Qwen2VLPlugin, Qwen3VLPlugin
 from .kimi_k25_plugin import KimiK25Plugin
+from .minicpm_v_4_6_plugin import MiniCPMV46Plugin
 
 
 logger = logging.getLogger(__name__)
@@ -927,6 +928,18 @@ _register_chat_template(
 )
 
 _register_chat_template(
+    name="qwen3.8-hf",
+    cls=HFChatTemplate,
+    chat_template=_read_builtin_chat_template("qwen3_8_hf_training.jinja"),
+    chat_template_kwargs={
+        "enable_thinking": False,
+        "reasoning_effort": "low",
+        "preserve_thinking": True,
+    },
+    mm_plugin=Qwen3VLPlugin(image_token="<|image_pad|>", video_token="<|video_pad|>"),
+)
+
+_register_chat_template(
     name="qwen3.6-hf",
     cls=HFChatTemplate,
     chat_template=_read_builtin_chat_template("qwen3_6_hf_training.jinja"),
@@ -951,6 +964,13 @@ _register_chat_template(
     name="llava-onevision-hf",
     cls=HFChatTemplate,
     chat_template=_read_builtin_chat_template("qwen_chat_hf_training.jinja"),
+)
+
+_register_chat_template(
+    name="minicpm-v-4.6-hf",
+    cls=HFChatTemplate,
+    chat_template=_read_builtin_chat_template("minicpm_v_4_6_hf_training.jinja"),
+    mm_plugin=MiniCPMV46Plugin(image_token="<|image_pad|>"),
 )
 
 _register_chat_template(
@@ -1273,4 +1293,23 @@ _register_chat_template(
     format_prefix=EmptyFormatter(slots=["[gMASK]<sop>"]),
     stop_words=["<|user|>", "<|observation|>"],
     efficient_eos=True,
+)
+
+# GLM-5.2 changes the prompt format relative to GLM-5: a `Reasoning Effort` system line
+# (default Max, `high` selectable via --chat-template-kwargs), an empty `<think></think>`
+# pair on non-thinking turns where 5.1 emitted a bare `</think>`, and a multi-modal
+# refusal reminder. Registered as an HFChatTemplate so OpenAI-style SFT gets assistant-only
+# loss masks from the template's generation blocks.
+_register_chat_template(
+    name="glm5.2-hf",
+    cls=HFChatTemplate,
+    chat_template=_read_builtin_chat_template("glm5_2_hf_training.jinja"),
+    stop_words=["<|user|>", "<|observation|>"],
+    mm_plugin=KimiK25Plugin(
+        image_token="<|image|>",
+        video_token=None,
+        merge_kernel_size=(2, 2),
+        image_prefix="<|begin_of_image|>",
+        image_suffix="<|end_of_image|>",
+    ),
 )

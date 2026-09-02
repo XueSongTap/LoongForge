@@ -4,39 +4,6 @@
 
 # ═══════════════════════════════════════════════════════════════
 # run_fastwam_sft_ddp_zero1_finetune.sh - FastWAM SFT Launch Script (DDP + ZeRO-1)
-#
-# Delta versus run_fastwam_sft_ddp_finetune.sh:
-#   --zero-optimizer                    wrap the optimizer in
-#                                       ZeroRedundancyOptimizer, sharding
-#                                       optimizer states across ranks. Only
-#                                       effective with --distributed-strategy ddp.
-#   --no-ddp-find-unused-parameters     skip the unused-parameter scan; FastWAM's
-#                                       forward graph has no conditional branches.
-#   --ddp-static-graph                  graph is identical every iteration, lets
-#                                       DDP reuse its bucket/reduction plan.
-#   --ddp-gradient-as-bucket-view       expose grads as views into the comm
-#                                       buckets instead of separate allocations.
-#   --no-ddp-broadcast-buffers          no BN-style buffers to sync each forward.
-#   --ddp-bucket-cap-mb                 larger buckets: fewer, bigger all-reduces.
-#
-# The memory saved by ZeRO-1 is what makes the larger --per-device-batch-size
-# below affordable relative to the plain DDP script.
-#
-# Two optional ZeRO knobs are left off by default:
-#   --zero-parameters-as-bucket-view    further cuts peak memory, but can clash
-#                                       with torch.compile + the DDP reducer.
-#   --zero-master-param-dtype fp32      rank-local fp32 master params, broadcast
-#                                       after each step. Better numerics under
-#                                       bf16 training at some bandwidth cost.
-#
-# Usage:
-#   bash run_fastwam_sft_ddp_zero1_finetune.sh
-#   DATASET_PATH=/path/to/libero TOKENIZER_PATH=/path/to/tokenizer \
-#     bash run_fastwam_sft_ddp_zero1_finetune.sh
-#   GPUS_PER_NODE=4 bash run_fastwam_sft_ddp_zero1_finetune.sh                   # override via env
-#   bash run_fastwam_sft_ddp_zero1_finetune.sh --train-iters 50                  # override a flag
-#   bash run_fastwam_sft_ddp_zero1_finetune.sh model.action_dit_pretrained_path=/path  # dotlist form
-# ═══════════════════════════════════════════════════════════════
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,6 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ── Environment ───────────────────────────────────────────────
 export LOONGFORGE_PATH=${LOONGFORGE_PATH:-"$(cd "$SCRIPT_DIR/../../.." && pwd)"}
 export LOCAL_VLA_ARTIFACTS_ROOT=${LOCAL_VLA_ARTIFACTS_ROOT:-"/ssd2/loongforge_embodied_ci/vla_artifacts"}
+export DIFFSYNTH_MODEL_BASE_PATH=${DIFFSYNTH_MODEL_BASE_PATH:-"$LOCAL_VLA_ARTIFACTS_ROOT/fastwam/models/"}
 
 # ── Distributed ───────────────────────────────────────────────
 # Cluster schedulers commonly export WORLD_SIZE (node count) and RANK (node rank).
@@ -66,12 +34,12 @@ export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
 
 # ── Paths ─────────────────────────────────────────────────────
 TOKENIZER_PATH=${TOKENIZER_PATH:-"$LOCAL_VLA_ARTIFACTS_ROOT/fastwam/models/Wan2.2-TI2V-5B"}
-DATASET_PATH=${DATASET_PATH:"$LOCAL_VLA_ARTIFACTS_ROOT/fastwam/datasets/LIBERO-fastwam/libero_10_no_noops_lerobot"}
+DATASET_PATH=${DATASET_PATH:-"$LOCAL_VLA_ARTIFACTS_ROOT/fastwam/datasets/LIBERO-fastwam/libero_10_no_noops_lerobot"}
 OUTPUT_DIR=${OUTPUT_DIR:-"$LOONGFORGE_PATH/outputs/fastwam_sft_zero1"}
 
 PRETRAINED_CHECKPOINT=${PRETRAINED_CHECKPOINT:-}
-ACTION_DIT_PRETRAINED_PATH=${ACTION_DIT_PRETRAINED_PATH:-}
-TEXT_EMBEDDING_CACHE_DIR=${TEXT_EMBEDDING_CACHE_DIR:-}
+ACTION_DIT_PRETRAINED_PATH=${ACTION_DIT_PRETRAINED_PATH:-"$LOCAL_VLA_ARTIFACTS_ROOT/fastwam/models/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt"}
+TEXT_EMBEDDING_CACHE_DIR=${TEXT_EMBEDDING_CACHE_DIR:-"$LOCAL_VLA_ARTIFACTS_ROOT/fastwam/datasets/text_embeds"}
 
 # ── Model config ──────────────────────────────────────────────
 MODEL_NAME=${MODEL_NAME:-"fastwam"}
@@ -93,7 +61,7 @@ DATA_ARGS=(
 )
 
 # ── Training params ───────────────────────────────────────────
-TRAIN_ITERS=${TRAIN_ITERS:-20000}
+TRAIN_ITERS=${TRAIN_ITERS:-20}
 PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-16}
 GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-1}
 SAVE_INTERVAL=${SAVE_INTERVAL:-2000}
@@ -112,6 +80,8 @@ TRAINING_ARGS=(
     --lr-warmup-iters 0
     --min-lr 1.0e-9
     # Optimizer
+    --optimizer TorchFusedAdamW
+    --cudnn-benchmark
     --clip-grad 1.0
     --weight-decay 0.01
     --adam-beta1 0.9
@@ -133,6 +103,8 @@ DISTRIBUTED_TRAINING_ARGS=(
     --no-ddp-broadcast-buffers
     --ddp-bucket-cap-mb 200
     --dtype bfloat16
+    --no-check-for-nan-in-loss-and-grad
+    --zero-parameters-as-bucket-view
 )
 
 # ── Logging params ────────────────────────────────────────────

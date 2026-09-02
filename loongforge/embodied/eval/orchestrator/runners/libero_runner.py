@@ -49,6 +49,18 @@ class EpisodeTimeoutError(TimeoutError):
     pass
 
 
+def _render_resolution(args: argparse.Namespace) -> int:
+    """Camera render size: optional benchmark.render_resolution, else the shared default.
+
+    Some models' official eval clients render LIBERO natively at a size other
+    than ``LIBERO_ENV_RESOLUTION`` (LingBot-VA renders 128), and resizing a
+    256-render down is not the same image. Omitting the knob keeps the previous
+    behaviour for every existing config.
+    """
+    value = int(getattr(args, "render_resolution", 0) or 0)
+    return value if value > 0 else LIBERO_ENV_RESOLUTION
+
+
 def _get_libero_env(task, resolution: int, seed: int):
     """Run _get_libero_env."""
     from libero.libero import get_libero_path
@@ -220,13 +232,19 @@ def run_episode(
 
     try:
         with alarm_timeout(args.per_episode_timeout_sec, EpisodeTimeoutError):
-            env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, episode_seed)
+            env, task_description = _get_libero_env(task, _render_resolution(args), episode_seed)
             reset_start = time.time()
             client.reset(episode_id)
             payload_builder.reset(episode_id)
             action_decoder.reset()
             env.reset()
             obs = env.set_init_state(initial_state)
+            # set_init_state teleports the sim but robosuite OSC controllers only
+            # refresh ee_pos/ee_ori_mat inside step(); force a sync so the first
+            # observation does not mix the pre-reset controller pose with the
+            # init-state quaternion.
+            for robot in env.env.robots:
+                robot.controller.update(force=True)
             reset_time_sec = time.time() - reset_start
 
             # Explicit benchmark.max_steps takes priority over the suite
@@ -275,7 +293,16 @@ def run_episode(
                 request_start = time.perf_counter()
                 with alarm_timeout(args.policy_call_timeout_ms / 1000.0, TimeoutError):
                     response = client.predict_action(
-                        **_build_rpc_payload(payload_builder, canonical_obs, ctx)
+                        **_build_rpc_payload(
+                            payload_builder,
+                            canonical_obs,
+                            ctx,
+                            # Closed-loop-within-chunk models (PayloadBuilder capability)
+                            # must be called every env step; others keep the chunk cache.
+                            disable_action_cache=bool(
+                                getattr(payload_builder, "disable_action_cache", False)
+                            ),
+                        )
                     )
                 e2e_latency_ms = (time.perf_counter() - request_start) * 1000.0
                 e2e_latencies.append(e2e_latency_ms)
@@ -429,6 +456,7 @@ def run_batch(args: argparse.Namespace) -> Dict[str, Any]:
         suite_name=args.task_suite_name,
         episodes_per_task=args.episodes_per_task,
         continuous_gripper=getattr(args, "continuous_gripper", False),
+        resolution=_render_resolution(args),
     )
     payload_builder, action_decoder_key, action_decoder = _common.build_policy_stack(args, adapter)
     logging.info(

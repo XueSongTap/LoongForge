@@ -27,7 +27,7 @@ The more context you provide, the easier it will be for maintainers to diagnose 
 ## Pull Requests
 We strongly welcome pull requests to help improve LoongForge.
 
-All pull requests will be reviewed by the maintainers. Automated checks and tests will be run as part of the review process. Once all checks pass and the review is approved, the pull request will be accepted. Please note that merging into the `main` branch may not happen immediately and could be subject to scheduling.
+All pull requests will be reviewed by the maintainers. The `CI Gate` workflow runs the blocking CPU checks for each PR. Once it passes and the review is approved, the pull request can be merged into the `master` branch.
 
 ### Repository Structure
 
@@ -76,8 +76,8 @@ cd ../..
 
 ```bash
 # LoongForge
-git checkout main
-git pull upstream main
+git checkout master
+git pull upstream master
 git checkout -b feature/your-feature-name
 
 # Loong-Megatron (only if modifying Megatron)
@@ -100,8 +100,8 @@ git commit -m "feat: add your commit message"
 ### Step 5 — Sync with upstream and push to your fork
 
 ```bash
-# (Optional but recommended) Rebase on the latest upstream main before pushing
-git pull --rebase upstream main
+# (Optional but recommended) Rebase on the latest upstream master before pushing
+git pull --rebase upstream master
 git push -u origin feature/your-feature-name
 ```
 
@@ -117,7 +117,7 @@ git push -u my-fork feature/your-feature-name
 
 Open a PR on GitHub from your feature branch to the target upstream branch:
 
-- **LoongForge changes**: `your-name/LoongForge:feature/xxx` → `baidu-baige/LoongForge:main`
+- **LoongForge changes**: `your-name/LoongForge:feature/xxx` → `baidu-baige/LoongForge:master`
 - **Megatron changes**: `your-name/Loong-Megatron:feature/xxx` → `baidu-baige/Loong-Megatron:loong-main/core_v0.15.0`
 - **TE changes**: commit the patch file to LoongForge, then open a PR as in the LoongForge flow above
 
@@ -127,7 +127,7 @@ Open a PR on GitHub from your feature branch to the target upstream branch:
 
 Before submitting a pull request, please make sure that:
 
-1. You create your branch from the correct base branch (`main` for LoongForge, `loong-main/core_v0.15.0` for Loong-Megatron).
+1. You create your branch from the correct base branch (`master` for LoongForge, `loong-main/core_v0.15.0` for Loong-Megatron).
 2. You update relevant code comments or documentation if APIs are changed.
 3. You add the appropriate copyright and license notice to the top of any new source files when applicable, and preserve upstream notices for third-party derived files.
 4. For original source files, prefer using the SPDX-based Apache-2.0 header described in the project guidelines.
@@ -137,14 +137,22 @@ Before submitting a pull request, please make sure that:
 
 ## Continuous Integration
 
-Every PR runs the following GitHub Actions workflows on CPU runners (no GPU/XPU).
+Every PR runs the following checks through the `CI Gate` GitHub Actions workflow on CPU runners (no GPU/XPU). The individual workflows are reusable checks called by `ci-gate.yml` and are not triggered directly.
 
 | Workflow | What it checks | Reproduce locally |
 |---|---|---|
+| CI Gate | All blocking CPU checks below | Open or update a PR |
 | PR Title Check | Title matches `[<modules>] <type>: <description>` | n/a — edit the PR title |
 | License Header | Newly added `.py/.sh/.cu/.cpp/.h` files have the SPDX Apache-2.0 header | `pre-commit run spdx-check --files <path>` |
-| Secret Scan | gitleaks finds no leaked secrets in new commits | `gitleaks detect --config .gitleaks.toml` |
-| Build | `python -m build` succeeds on Python 3.10 and 3.12 | `python -m build --sdist --wheel --outdir dist/` |
+| Secret Scan | gitleaks finds no leaked secrets in staged files locally and new commits in CI | `pre-commit run gitleaks` (staged files); CI scans the PR commit range |
+| Ruff | New or modified Python files pass Ruff (`E4,E7,E9,E501,F,S506`) | `ruff check <changed-python-files>` |
+| Build | `python -m build` and wheel import smoke succeed on Python 3.12 | `python -m build --sdist --wheel --outdir dist/` |
+| Sensitive Scan | No blocking internal-only information is present in changed files | `pre-commit run sensitive-scan --all-files` |
+| Workflow Lint | GitHub Actions files pass `actionlint`, YAML parsing, and CI helper contract tests | `actionlint && node --test tests/test_ci_helpers.js` |
+
+`workflow_dispatch` on `ci-gate.yml` is diagnostic and publishes a final job
+named `manual-ci-gate`. Only the automatically triggered PR job is named
+`ci-gate` and can satisfy the required merge check.
 
 ### Valid PR title modules
 
@@ -163,10 +171,30 @@ Every PR runs the following GitHub Actions workflows on CPU runners (no GPU/XPU)
 ```bash
 pip install pre-commit
 pre-commit install
-pre-commit run --all-files   # optional
+pre-commit run --all-files
 ```
 
-Once installed, the SPDX header check and other hygiene hooks run automatically on `git commit`.
+Once installed, the hygiene, SPDX, gitleaks, and sensitive-information hooks
+run automatically on `git commit`. The first gitleaks run may take a few
+minutes while pre-commit builds the pinned release in its isolated Go
+environment. The gitleaks hook scans staged content; the sensitive-information
+hook scans the files passed by pre-commit. These hooks complement, but do not
+replace, the PR commit-range and full CI scans.
+
+### GPU validation
+
+Maintainers may request GPU validation with `/ok-to-test --suite llm_vlm|embodied`.
+The suite selects the corresponding self-hosted runner (`llm_vlm` on a and
+`embodied` on p). The default run uses the suite's known-good baseline;
+`--model` requests a baseline-backed subset for additional validation. Add
+`--build-image` to build the PR Dockerfile on that same runner and run the
+regression against the local candidate image. Runner and machine configuration
+is provided through protected Environment variables, and new commits
+invalidate previous GPU results. The PR Check reports queued, candidate-image
+build, regression, cancelled, and final states. When a new commit arrives, the
+older queued or running suite job is cancelled; cleanup of its temporary
+context, regression container, and candidate image is targeted and best-effort
+without globally pruning the runner's shared BuildKit cache.
 
 ## License
 By contributing to LoongForge, you agree that your original contributions will be licensed under the [Apache License 2.0](https://github.com/baidu-baige/LoongForge/blob/master/LICENSE).

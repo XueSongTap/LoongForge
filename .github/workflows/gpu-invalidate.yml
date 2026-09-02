@@ -1,0 +1,26 @@
+name: GPU Regression Invalidation
+
+on:
+  pull_request_target:
+    types: [synchronize]
+
+permissions: {}
+
+jobs:
+  invalidate_llm_vlm:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: gpu-regression-${{ github.event.pull_request.number }}-llm_vlm
+      cancel-in-progress: true
+    steps:
+      - name: Invalidate stale LLM/VLM work
+        run: echo "Cancelled stale LLM/VLM GPU work for this pull request, if any."
+
+  invalidate_embodied:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: gpu-regression-${{ github.event.pull_request.number }}-embodied
+      cancel-in-progress: true
+    steps:
+      - name: Invalidate stale embodied work
+        run: echo "Cancelled stale embodied GPU work for this pull request, if any."

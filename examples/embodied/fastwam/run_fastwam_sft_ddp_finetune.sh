@@ -18,6 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ── Environment ───────────────────────────────────────────────
 export LOONGFORGE_PATH=${LOONGFORGE_PATH:-"$(cd "$SCRIPT_DIR/../../.." && pwd)"}
 export LOCAL_VLA_ARTIFACTS_ROOT=${LOCAL_VLA_ARTIFACTS_ROOT:-"/ssd2/loongforge_embodied_ci/vla_artifacts"}
+export DIFFSYNTH_MODEL_BASE_PATH=${DIFFSYNTH_MODEL_BASE_PATH:-"$LOCAL_VLA_ARTIFACTS_ROOT/fastwam/models/"}
 
 # ── Distributed ───────────────────────────────────────────────
 # Cluster schedulers commonly export WORLD_SIZE (node count) and RANK (node rank).
@@ -40,12 +41,12 @@ export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
 
 # ── Paths ─────────────────────────────────────────────────────
 TOKENIZER_PATH=${TOKENIZER_PATH:-"$LOCAL_VLA_ARTIFACTS_ROOT/fastwam/models/Wan2.2-TI2V-5B"}
-DATASET_PATH=${DATASET_PATH:"$LOCAL_VLA_ARTIFACTS_ROOT/fastwam/datasets/LIBERO-fastwam/libero_10_no_noops_lerobot"}
+DATASET_PATH=${DATASET_PATH:-"$LOCAL_VLA_ARTIFACTS_ROOT/fastwam/datasets/LIBERO-fastwam/libero_10_no_noops_lerobot"}
 OUTPUT_DIR=${OUTPUT_DIR:-"$LOONGFORGE_PATH/outputs/fastwam_sft_ddp"}
 
 PRETRAINED_CHECKPOINT=${PRETRAINED_CHECKPOINT:-}
-ACTION_DIT_PRETRAINED_PATH=${ACTION_DIT_PRETRAINED_PATH:-}
-TEXT_EMBEDDING_CACHE_DIR=${TEXT_EMBEDDING_CACHE_DIR:-}
+ACTION_DIT_PRETRAINED_PATH=${ACTION_DIT_PRETRAINED_PATH:-"$LOCAL_VLA_ARTIFACTS_ROOT/fastwam/models/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt"}
+TEXT_EMBEDDING_CACHE_DIR=${TEXT_EMBEDDING_CACHE_DIR:-"$LOCAL_VLA_ARTIFACTS_ROOT/fastwam/datasets/text_embeds"}
 
 # ── Model config ──────────────────────────────────────────────
 MODEL_NAME=${MODEL_NAME:-"fastwam"}
@@ -67,7 +68,7 @@ DATA_ARGS=(
 )
 
 # ── Training params ───────────────────────────────────────────
-TRAIN_ITERS=${TRAIN_ITERS:-20000}
+TRAIN_ITERS=${TRAIN_ITERS:-20}
 PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-1}
 GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-1}
 SAVE_INTERVAL=${SAVE_INTERVAL:-2000}
@@ -86,6 +87,8 @@ TRAINING_ARGS=(
     --lr-warmup-iters 0
     --min-lr 1.0e-9
     # Optimizer
+    --optimizer TorchFusedAdamW
+    --cudnn-benchmark
     --clip-grad 1.0
     --weight-decay 0.01
     --adam-beta1 0.9
@@ -100,7 +103,13 @@ fi
 
 DISTRIBUTED_TRAINING_ARGS=(
     --distributed-strategy ddp
+    --no-ddp-find-unused-parameters
+    --ddp-static-graph
+    --ddp-gradient-as-bucket-view
+    --no-ddp-broadcast-buffers
+    --ddp-bucket-cap-mb 200
     --dtype bfloat16
+    --no-check-for-nan-in-loss-and-grad
 )
 
 # ── Logging params ────────────────────────────────────────────

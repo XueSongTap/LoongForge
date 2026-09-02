@@ -60,7 +60,7 @@ def _add_log_tensor_args(parser):
     model training. When enabled (via --enable-log-tensor), the system will
     register hooks to capture tensor statistics during training.
 
-    Required dependency: llm-inspector (internal Baige library)
+    Required dependency: llm-inspector
 
     Usage:
         These arguments are typically used together:
@@ -382,6 +382,14 @@ def _add_extra_tokenizer_args(parser: argparse.ArgumentParser):
              "(1) Model ID from huggingface.co (e.g., 'meta-llama/Llama-2-7b-hf'), or "
              "(2) Local directory path containing tokenizer files. "
              "Default: None"
+    )
+
+    group.add_argument(
+        "--hf-processor-path",
+        type=str,
+        default=None,
+        help="Optional HuggingFace processor path when it differs from the tokenizer path. "
+             "Defaults to --hf-tokenizer-path."
     )
 
     group.add_argument(

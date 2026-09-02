@@ -22,6 +22,7 @@ else:
 
 from megatron.energon.task_encoder.base import stateless
 from transformers import AutoProcessor
+from transformers.processing_utils import ProcessorMixin
 from loongforge.utils import constants, get_chat_template
 from qwen_vl_utils.vision_process import smart_nframes, smart_resize
 from torchvision import transforms
@@ -128,7 +129,21 @@ class VLMTaskEncoder(BaseTaskEncoder):
         super().__init__()
         if args.training_phase in ['sft']:
             self.chat_template = get_chat_template()
-        self.processor = AutoProcessor.from_pretrained(self.args.hf_tokenizer_path, trust_remote_code=True)
+        processor_path = getattr(self.args, "hf_processor_path", None)
+        if processor_path:
+            # Transformers 5.3 logs this processor via repr; Kimi's repr is not pickle-safe.
+            original_repr = ProcessorMixin.__repr__
+            ProcessorMixin.__repr__ = object.__repr__
+            try:
+                self.processor = AutoProcessor.from_pretrained(
+                    processor_path, trust_remote_code=True
+                )
+            finally:
+                ProcessorMixin.__repr__ = original_repr
+        else:
+            self.processor = AutoProcessor.from_pretrained(
+                self.args.hf_tokenizer_path, trust_remote_code=True
+            )
         if args.image_resolution:
             setattr(self.processor, "image_resolution", args.image_resolution)
         # video
@@ -207,13 +222,14 @@ class VLMTaskEncoder(BaseTaskEncoder):
 
         return image
 
-    def _process(self, image, text):
+    def _process(self, image, text, add_special_tokens=True):
         """ " Process the data to get the model's input"""
         inputs = self.processor(
             text=text,
             images=image,
             padding=True,
             return_tensors="pt",
+            add_special_tokens=add_special_tokens,
         )
         input_ids = inputs["input_ids"][0]
         attn_mask = inputs["attention_mask"][0].logical_not()
@@ -246,10 +262,13 @@ class VLMTaskEncoder(BaseTaskEncoder):
         ).replace("<image>", IMAGE_TOKEN_WITH_TAGS)
         if text[-1] == "\n":
             text = text[:-1]
-        input_ids, _, imgs, image_grid_thw, attn_mask = self._process(image, text)
+        input_ids, _, imgs, image_grid_thw, attn_mask = self._process(
+            image, text, add_special_tokens=False
+        )
         target = torch.ones_like(input_ids) * IGNORE_INDEX
-        answer_ids = self.tokenizer.tokenize(answer)
+        answer_ids = self.tokenizer.tokenize(answer, add_special_tokens=False)
         target[-len(answer_ids) - 1 : -1] = torch.tensor(answer_ids)
+        target[-1] = input_ids[-1]
 
         return input_ids, target, attn_mask, imgs, image_grid_thw
 
@@ -285,18 +304,7 @@ class VLMTaskEncoder(BaseTaskEncoder):
             image_grid_thw = mm_inputs["image_grid_thw"]
             pixel_values_images = [mm_inputs["pixel_values"]]
 
-        encode_pairs = self.chat_template.encode_multiturn(
-            tokenizer=self.tokenizer,
-            messages=messages,
-            system=system,
-        )
-
-        input_ids, target = [], []
-        for turn_idx, (source_ids, target_ids) in enumerate(encode_pairs):
-            input_ids += source_ids + target_ids
-            target += [IGNORE_INDEX] * len(source_ids) + target_ids
-        input_ids = torch.tensor(input_ids)
-        target = torch.tensor(target)
+        input_ids, target = self._encode_sft_messages(messages, system, tools)
         attn_mask = torch.zeros_like(input_ids).bool()
 
         return (
@@ -308,6 +316,49 @@ class VLMTaskEncoder(BaseTaskEncoder):
             pixel_values_videos,
             video_grid_thw,
         )
+
+    def _encode_sft_messages(self, messages, system=None, tools=None):
+        """Encode SFT messages with either an HF or legacy chat template.
+
+        Args:
+            messages: Normalized conversation messages.
+            system: Optional system prompt.
+            tools: Optional tool definitions for HF chat templates.
+
+        Returns:
+            Token IDs and training targets.
+        """
+        if isinstance(self.chat_template, HFChatTemplate):
+            hf_messages = list(messages)
+            has_system_message = (
+                hf_messages
+                and hf_messages[0].get("role") == constants.DataRoles.SYSTEM
+            )
+            if system and not has_system_message:
+                hf_messages = [
+                    {"role": constants.DataRoles.SYSTEM, "content": system},
+                    *hf_messages,
+                ]
+            input_ids, target, _, _ = self.chat_template.encode_openai(
+                tokenizer=self.tokenizer,
+                messages=hf_messages,
+                tools=tools,
+                train_on_prompt=getattr(self.args, "train_on_prompt", False),
+                history_mask_loss=getattr(self.args, "history_mask_loss", False),
+                ignore_index=IGNORE_INDEX,
+            )
+        else:
+            encode_pairs = self.chat_template.encode_multiturn(
+                tokenizer=self.tokenizer,
+                messages=messages,
+                system=system,
+            )
+            input_ids, target = [], []
+            for source_ids, target_ids in encode_pairs:
+                input_ids += source_ids + target_ids
+                target += [IGNORE_INDEX] * len(source_ids) + target_ids
+
+        return torch.tensor(input_ids), torch.tensor(target)
 
     def _make_sample_from(self, sample, *, cls=None, key=None, **fields):
         """Derive a new sample from ``sample``, carrying its energon meta.
@@ -590,6 +641,7 @@ class VLMTaskEncoder(BaseTaskEncoder):
         """Generates an encoded multimodal packed vqa sample from a raw sample."""
         n_orig_sample = len(sample.images)
         l_VLMTaskSample = []
+        self.is_packing_enabled = True
         for idx in range(n_orig_sample):
             if _ENERGON_NEEDS_SUBFLAVOR:
                 cur_capsample = VQASample(
@@ -610,9 +662,15 @@ class VLMTaskEncoder(BaseTaskEncoder):
                     answers=sample.answers[idx],
                     context=sample.contexts[idx],
                 )
-            l_VLMTaskSample.append(self.encode_vqa4packing(cur_capsample))
+            encoded = self.encode_vqa(cur_capsample)
+            if encoded is None:
+                raise ValueError(
+                    f"encode_packed_vqa: member {cur_capsample.__key__} was "
+                    "dropped during encode_vqa. Offline-packed artifacts "
+                    "cannot drop individual members."
+                )
+            l_VLMTaskSample.append(encoded)
         l_sample_packed = self.pack_selected_samples(l_VLMTaskSample)
-        self.is_packing_enabled = True
         return l_sample_packed
 
     def encode_packed_multi_mix_qa(
@@ -639,6 +697,7 @@ class VLMTaskEncoder(BaseTaskEncoder):
                 f"encode_packed_multi_mix_qa: media count ({len(media_list)}) "
                 f"!= context count ({n_orig_sample}) for key={sample.__key__}"
             )
+        self.is_packing_enabled = True
         for idx in range(n_orig_sample):
             contexts = sample.contexts[idx]
             media_group = None if has_text_only else media_list[idx]  # List[Tensor] or List[AVData]
@@ -708,9 +767,15 @@ class VLMTaskEncoder(BaseTaskEncoder):
                 if _ENERGON_NEEDS_SUBFLAVOR:
                     init_kwargs["__subflavor__"] = None
                 cur_sample = MultiMixQASample(**init_kwargs)
-            l_VLMTaskSample.append(self.encode_multi_mix_qa4packing(cur_sample))
+            encoded = self.encode_multi_mix_qa(cur_sample)
+            if encoded is None:
+                raise ValueError(
+                    f"encode_packed_multi_mix_qa: member {cur_sample.__key__} was "
+                    "dropped during encode_multi_mix_qa. Offline-packed artifacts "
+                    "cannot drop individual members."
+                )
+            l_VLMTaskSample.append(encoded)
         l_sample_packed = self.pack_selected_samples(l_VLMTaskSample)
-        self.is_packing_enabled = True
         return l_sample_packed
 
     def encode_packed_chat_mix(
@@ -787,107 +852,6 @@ class VLMTaskEncoder(BaseTaskEncoder):
         l_sample_packed = self.pack_selected_samples(encoded_members)
         self.is_packing_enabled = True
         return l_sample_packed
-
-    def encode_multi_mix_qa4packing(self, sample: MultiMixQASample) -> BaseTaskSample:
-        """Encode MultiMixQASample in Qwen2VL style."""
-
-        if self.args.training_phase == constants.TrainingPhase.SFT:
-            (
-                input_ids,
-                target,
-                attn_mask,
-                imgs,
-                image_grid_thw,
-                pixel_values_videos,
-                video_grid_thw,
-            ) = self.process_sft_qa(
-                sample.messages,
-                sample.system,
-                sample.video,
-                sample.image,
-                tools=getattr(sample, "tools", None),
-            )
-
-            num_tiles = []
-            if sample.video is not None:
-                num_tiles = [len(video_grid_thw)]
-            elif sample.image is not None:
-                num_tiles = [len(image_grid_thw)]
-        else:
-            raise NotImplementedError(
-                f"Unknown training phase {self.args.training_phase}"
-            )
-
-        if self.args.enable_discard_sample:
-            assert (
-                len(input_ids) <= self.args.seq_length
-            ), f"{sample.__key__} input length {len(input_ids)}"
-        elif sample.video is not None:
-            assert (
-                video_grid_thw.prod(dim=-1).sum() / 4 <= self.args.seq_length
-            ), f"{sample.__key__} grid_thw: {video_grid_thw}"
-        elif sample.image is not None:
-            assert (
-                image_grid_thw.prod(dim=-1).sum() / 4 <= self.args.seq_length
-            ), f"{sample.__key__} grid_thw: {image_grid_thw}"
-
-        return self._make_sample_from(
-            sample,
-            imgs=imgs,
-            image_grid_thw=image_grid_thw,
-            pixel_values_videos=pixel_values_videos,
-            video_grid_thw=video_grid_thw,
-            num_tiles=num_tiles,
-            tokens=input_ids,
-            labels=target,
-            attn_mask=attn_mask,
-            total_len=len(input_ids),
-        )
-    
-
-    def encode_vqa4packing(self, sample: VQASample) -> BaseTaskSample:
-        """Encode VQASample in Qwen2VL style."""
-
-        text = self.processor.apply_chat_template(
-            [
-                {"role": "user", "content": sample.context},
-                {"role": "assistant", "content": sample.answers},
-            ],
-            tokenize=False,
-        ).replace("<image>", IMAGE_TOKEN_WITH_TAGS)
-
-        if text[-1] == "\n":
-            text = text[:-1]
-            pass
-
-        input_ids, _, imgs, image_grid_thw, attn_mask = self._process(
-            sample.image, text
-        )
-        target = torch.ones_like(input_ids) * IGNORE_INDEX
-        answers = self.tokenizer.tokenize(sample.answers)
-        target[-len(answers) - 1 : -1] = torch.tensor(answers)
-        target[-1] = input_ids[-1]
-
-        num_tiles = [len(image_grid_thw)]
-        if self.args.enable_discard_sample:
-            assert (
-                len(input_ids) <= self.args.seq_length
-            ), f"{sample.__key__} input length {len(input_ids)}"
-        else:
-            assert (
-                image_grid_thw.prod() / 4 <= self.args.seq_length
-            ), f"{sample.__key__} grid_thw: {image_grid_thw}"
-
-        return self._make_sample_from(
-            sample,
-            imgs=imgs,
-            image_grid_thw=image_grid_thw,
-            num_tiles=num_tiles,
-            tokens=input_ids,
-            labels=target,
-            attn_mask=attn_mask,
-            total_len=len(input_ids),
-        )
 
     def process_samples_grid(self, samples):
         """concat grid_thw for image and video"""

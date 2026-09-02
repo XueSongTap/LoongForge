@@ -276,6 +276,12 @@ MODEL_CONFIG_REGISTRY = {
         "config_name": "qwen3_6_35b_a3b",
     },
 
+    # qwen3.8
+    "qwen3.8-27b": {
+        "config_path": "configs/models/qwen3.8",
+        "config_name": "qwen3_8_27b",
+    },
+
     # kimi-k2.x
     "kimi-k2.5": {
         "config_path": "configs/models/kimi_k2.5",
@@ -364,6 +370,12 @@ MODEL_CONFIG_REGISTRY = {
         "config_name": "qwen3_vl_235b_a22b",
     },
 
+    # minicpm-v
+    "minicpm-v-4.6": {
+        "config_path": "configs/models/minicpm_v_4_6",
+        "config_name": "minicpm_v_4_6",
+    },
+
     # wan
     "wan2-1-i2v": {
         "config_path": "configs/models/wan",
@@ -409,13 +421,13 @@ MODEL_CONFIG_REGISTRY = {
         "config_path": "configs/models/ernie4.5vl",
         "config_name": "ernie4_5_vl_28b_a3b",
     },
-    "llava-onevision-1.5-4b": {
-        "config_path": "configs/models/llava_onevision",
-        "config_name": "llava_onevision_1_5_4b",
-    },
     "glm5": {
         "config_path": "configs/models/glm5",
         "config_name": "glm5",
+    },
+    "glm5.2": {
+        "config_path": "configs/models/glm5.2",
+        "config_name": "glm5_2",
     },
 }
 
