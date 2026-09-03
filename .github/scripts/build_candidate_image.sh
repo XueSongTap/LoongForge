@@ -4,15 +4,20 @@
 
 set -euo pipefail
 
-target="${1:-}"
+target="${1:-auto}"
 case "$target" in
-  a|p) ;;
+  a|p|auto) ;;
   *) echo "unsupported image target" >&2; exit 2 ;;
 esac
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${script_dir}/load_ci_config.sh"
+
+if [[ "$target" == auto ]]; then
+  detected_target="$($script_dir/self_runner/detect_gpu_target.sh)" || exit 1
+  target="$detected_target"
+fi
 
 builder="${LOONGFORGE_IMAGE_BUILDER:-$script_dir/self_runner/build_candidate_image.sh}"
 [[ -x "$builder" ]] || { echo "LOONGFORGE_IMAGE_BUILDER must point to an executable" >&2; exit 2; }

@@ -225,11 +225,15 @@ RULES = [
     },
     {
         "id": "internal-codename",
-        "severity": "warn",
+        "severity": "error",
         "title": "Internal hardware or product codename",
         "why": "Non-public chip/cluster/product codenames disclose the internal "
                "hardware fleet and roadmap.",
-        "pattern": r"(?i)\bBZZ\d?\b|\bP(?:6K)\b|\bDECK_STD\w*\b|\bqianfan\b|\bwenxin\b",
+        # Datacenter codenames come as a `<letters>zz<digit>` family (Bzz2, Hzz2,
+        # ...), so match the shape rather than the one member that happened to
+        # be known first; spelling out only BZZ let sibling names through.
+        "pattern": r"(?i)\bBZZ\d?\b|\b[A-Z]{1,3}ZZ\d{1,2}\b"
+                   r"|\bP(?:6K)\b|\bDECK_STD\w*\b|\bqianfan\b|\bwenxin\b",
         "hint": "Use a public model designation, or parameterize it.",
     },
     {
@@ -255,6 +259,13 @@ RULES = [
 # Optional: match (regex applied to the matched text; when absent, every match
 # under `path` is allowed).
 ALLOWLIST = [
+    {
+        "rule": "corp-email",
+        "path": "README*.md",
+        "match": r"loongforge@baidu\.com",
+        "reason": "Official project role address for enterprise contact, "
+                  "deliberately published on the README.",
+    },
     {
         "rule": "legacy-internal-name",
         "path": "README*.md",

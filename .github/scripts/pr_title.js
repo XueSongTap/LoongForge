@@ -11,8 +11,11 @@ const MODULES = new Set([
 ]);
 
 function validatePullRequestTitle(title) {
-  const pattern = /^(?<breaking>\[BREAKING\])?\[(?<mods>[a-zA-Z0-9,\s\-]+)\]\s+(?<type>[a-zA-Z]+):\s+.+$/;
-  const match = title.match(pattern);
+  const legacyPattern = /^(?<breaking>\[BREAKING\])?\[(?<mods>[a-zA-Z0-9,\s\-]+)\]\s+(?<type>[a-zA-Z]+):\s+(?<description>\S.*)$/;
+  const conventionalPattern = /^(?<type>[a-zA-Z]+)(?:\((?<scope>[A-Za-z0-9][A-Za-z0-9._\/-]*)\))?(?<breaking>!)?:\s+(?<description>\S.*)$/;
+  const legacyMatch = title.match(legacyPattern);
+  const conventionalMatch = title.match(conventionalPattern);
+  const match = legacyMatch || conventionalMatch;
 
   if (!match) {
     return {
@@ -20,13 +23,16 @@ function validatePullRequestTitle(title) {
       message: [
         `PR title "${title}" does not match required format.`,
         '',
-        'Expected: [<modules>] <type>: <description>',
+        'Expected: <type>(<scope>): <description> (preferred)',
+        '      or: <type>: <description>',
+        '      or: [<modules>] <type>: <description>',
         '      or: [BREAKING][<modules>] <type>: <description>',
         '',
         `Valid types:   ${TYPES.join(', ')}`,
         `Valid modules: ${[...MODULES].join(', ')}`,
         '',
-        'Example: [llm, ckpt] feat: support Qwen3-Next checkpoint conversion',
+        'Examples: feat(ckpt): support Qwen3-Next checkpoint conversion',
+        '          [llm, ckpt] feat: support Qwen3-Next checkpoint conversion',
       ].join('\n'),
     };
   }
@@ -36,6 +42,18 @@ function validatePullRequestTitle(title) {
     return {
       ok: false,
       message: `Invalid type "${type}". Valid types: ${TYPES.join(', ')}`,
+    };
+  }
+
+  if (!legacyMatch) {
+    const scope = match.groups.scope ? match.groups.scope.toLowerCase() : undefined;
+    return {
+      ok: true,
+      message: 'PR title is valid.',
+      type,
+      scope,
+      breaking: Boolean(match.groups.breaking),
+      modules: [],
     };
   }
 
@@ -62,7 +80,13 @@ function validatePullRequestTitle(title) {
     };
   }
 
-  return { ok: true, message: 'PR title is valid.', type, modules };
+  return {
+    ok: true,
+    message: 'PR title is valid.',
+    type,
+    modules,
+    breaking: Boolean(match.groups.breaking),
+  };
 }
 
 module.exports = { validatePullRequestTitle };
