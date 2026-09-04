@@ -21,15 +21,29 @@ repos:
     rev: v1.5.5
     hooks:
       - id: insert-license
-        alias: spdx-check
-        name: SPDX header check
-        files: '\.(py|sh|cu|cpp|h)$'
+        alias: spdx-check-script
+        name: SPDX header check (Python/Shell)
+        files: '\.(py|sh)$'
         exclude: '^(third_party|patches|tests/datasets)/'
         args:
           - --license-filepath=.license-header.txt
           - --use-current-year
           - --detect-license-in-X-top-lines=10
           - --no-extra-eol
+          - --comment-style
+          - '#'
+      - id: insert-license
+        alias: spdx-check-cpp
+        name: SPDX header check (C/C++/CUDA)
+        files: '\.(c|cc|cpp|cxx|h|hh|hpp|hxx|cu|cuh)$'
+        exclude: '^(third_party|patches|tests/datasets)/'
+        args:
+          - --license-filepath=.license-header.txt
+          - --use-current-year
+          - --detect-license-in-X-top-lines=10
+          - --no-extra-eol
+          - --comment-style
+          - '//'
 
   # The Go language hook builds the pinned gitleaks release in pre-commit's
   # isolated environment, so developers do not need a system gitleaks binary.

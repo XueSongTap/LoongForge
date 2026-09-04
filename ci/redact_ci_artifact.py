@@ -110,7 +110,11 @@ def _sensitive_values() -> list[str]:
             name,
             re.IGNORECASE,
         ):
-            values.add(value)
+            # Skip trivially short values: runner-provided flags such as
+            # RUNNER_ALLOW_RUNASROOT=1 would otherwise replace every "1" in
+            # the artifact and destroy timestamps, exit codes, and metrics.
+            if len(value) >= 4:
+                values.add(value)
     return sorted(values, key=len, reverse=True)
 
 

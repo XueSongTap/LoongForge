@@ -27,10 +27,12 @@ GPUS_PER_NODE=8
 export NCCL_SOCKET_IFNAME=bond0
 export NCCL_IB_GID_INDEX=3
 
-# Hzz2
+# NVSHMEM_HCA_LIST must name the InfiniBand HCAs the host actually has, so
+# uncomment the line matching your cluster's NIC layout and comment out the other.
+# Layout A: mlx5_2 through mlx5_9
 # export NVSHMEM_HCA_LIST=mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_9
 
-# Bzz2
+# Layout B: mlx5_4, then mlx5_7 through mlx5_13
 export NVSHMEM_HCA_LIST=mlx5_4,mlx5_7,mlx5_8,mlx5_9,mlx5_10,mlx5_11,mlx5_12,mlx5_13
 export NVSHMEM_BOOTSTRAP=UID
 export NVSHMEM_IB_TRAFFIC_CLASS=130

@@ -27,7 +27,7 @@ The more context you provide, the easier it will be for maintainers to diagnose 
 ## Pull Requests
 We strongly welcome pull requests to help improve LoongForge.
 
-All pull requests will be reviewed by the maintainers. The `CI Gate` workflow runs the blocking CPU checks for each PR. Once it passes and the review is approved, the pull request can be merged into the `master` branch.
+All pull requests will be reviewed by the maintainers. The `Static Checks` workflow runs the blocking CPU checks for each PR. Once it passes and the review is approved, the pull request can be merged into the `master` branch.
 
 ### Repository Structure
 
@@ -137,11 +137,11 @@ Before submitting a pull request, please make sure that:
 
 ## Continuous Integration
 
-Every PR runs the following checks through the `CI Gate` GitHub Actions workflow on CPU runners (no GPU/XPU). The individual workflows are reusable checks called by `ci-gate.yml` and are not triggered directly.
+Every PR runs the following checks through the `Static Checks` GitHub Actions workflow on CPU runners (no GPU/XPU). The individual workflows are reusable checks called by `static-checks.yml` and are not triggered directly.
 
 | Workflow | What it checks | Reproduce locally |
 |---|---|---|
-| CI Gate | All blocking CPU checks below | Open or update a PR |
+| Static Checks | All blocking CPU checks below | Open or update a PR |
 | PR Title Check | Title matches `[<modules>] <type>: <description>` | n/a — edit the PR title |
 | License Header | Newly added `.py/.sh/.cu/.cpp/.h` files have the SPDX Apache-2.0 header | `pre-commit run spdx-check --files <path>` |
 | Secret Scan | gitleaks finds no leaked secrets in staged files locally and new commits in CI | `pre-commit run gitleaks` (staged files); CI scans the PR commit range |
@@ -150,9 +150,9 @@ Every PR runs the following checks through the `CI Gate` GitHub Actions workflow
 | Sensitive Scan | No blocking internal-only information is present in changed files | `pre-commit run sensitive-scan --all-files` |
 | Workflow Lint | GitHub Actions files pass `actionlint`, YAML parsing, and CI helper contract tests | `actionlint && node --test tests/test_ci_helpers.js` |
 
-`workflow_dispatch` on `ci-gate.yml` is diagnostic and publishes a final job
-named `manual-ci-gate`. Only the automatically triggered PR job is named
-`ci-gate` and can satisfy the required merge check.
+`workflow_dispatch` on `static-checks.yml` is diagnostic and publishes a final job
+named `manual-static-checks`. Only the automatically triggered PR job is named
+`static-checks` and can satisfy the required merge check.
 
 ### Valid PR title modules
 

@@ -14,7 +14,7 @@ destination="$2"
 archive_root="$3"
 shift 3
 
-manifest="/run/secrets/source_manifest"
+manifest="${SOURCE_MANIFEST_PATH:-/run/secrets/source_manifest}"
 if [[ ! -s "$manifest" ]]; then
   echo "WARNING: source manifest is unavailable; fetching unpinned public source for ${manifest_key} (${archive_root})" >&2
   "$@"
@@ -39,13 +39,22 @@ expected_sha="${!sha_var:-}"
 
 archive="$(mktemp)"
 trap 'rm -f "$archive"' EXIT
-wget --quiet --timeout=120 --tries=3 -O "$archive" "$url"
-printf '%s  %s\n' "$expected_sha" "$archive" | sha256sum --check --status
+if ! wget --quiet --timeout=120 --tries=3 -O "$archive" "$url"; then
+  echo "failed to download internal source: $manifest_key" >&2
+  exit 1
+fi
+if ! printf '%s  %s\n' "$expected_sha" "$archive" | sha256sum --check --status; then
+  echo "internal source checksum mismatch: $manifest_key" >&2
+  exit 1
+fi
 [[ "$had_xtrace" == true ]] && set -x
 
 parent="$(dirname "$destination")"
 mkdir -p "$parent"
-tar -xzf "$archive" -C "$parent"
+if ! tar -xzf "$archive" -C "$parent"; then
+  echo "invalid internal source archive: $manifest_key" >&2
+  exit 1
+fi
 extracted="$parent/$archive_root"
 [[ -d "$extracted" ]] || {
   echo "archive for $manifest_key does not contain $archive_root" >&2

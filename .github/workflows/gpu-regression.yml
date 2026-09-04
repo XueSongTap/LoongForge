@@ -1,5 +1,9 @@
 name: GPU Regression
 
+run-name: >-
+  GPU Regression PR #${{ inputs.pr_number }} ${{ inputs.suite }}
+  ${{ inputs.head_sha }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -43,12 +47,12 @@ jobs:
     outputs:
       tree_sha: ${{ steps.validate.outputs.tree_sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - id: validate
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           PR_NUMBER: ${{ inputs.pr_number }}
           HEAD_REPO: ${{ inputs.head_repo }}
@@ -109,15 +113,32 @@ jobs:
       group: gpu-regression-${{ inputs.pr_number }}-llm_vlm
       cancel-in-progress: true
     steps:
-      - name: Checkout trusted CI scripts
-        uses: actions/checkout@v4
+      - name: Revalidate current PR head
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          HEAD_REPO: ${{ inputs.head_repo }}
+          HEAD_SHA: ${{ inputs.head_sha }}
         with:
-          ref: ${{ github.ref }}
+          script: |
+            const { data: pull } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: Number(process.env.PR_NUMBER),
+            });
+            if (pull.head.sha !== process.env.HEAD_SHA ||
+                pull.head.repo?.full_name !== process.env.HEAD_REPO) {
+              core.setFailed('the requested revision is no longer the PR head');
+            }
+      - name: Checkout trusted CI scripts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
           path: trusted-ci
           persist-credentials: false
           submodules: false
       - name: Checkout immutable PR source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: ${{ inputs.head_repo }}
           ref: ${{ inputs.head_sha }}
@@ -136,7 +157,7 @@ jobs:
         run: trusted-ci/.github/scripts/self_runner/preflight.sh llm_vlm "${{ inputs.build_image && 'true' || 'false' }}"
       - name: Report candidate image build
         if: ${{ inputs.build_image && inputs.gate_check_id != '' }}
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           CHECK_ID: ${{ inputs.gate_check_id }}
           PR_NUMBER: ${{ inputs.pr_number }}
@@ -161,10 +182,10 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           TREE_SHA: ${{ needs.validate.outputs.tree_sha }}
           SOURCE_DIR: ${{ github.workspace }}/source
-        run: trusted-ci/.github/scripts/build_candidate_image.sh a
+        run: trusted-ci/.github/scripts/build_candidate_image.sh auto
       - name: Report regression run
         if: ${{ inputs.gate_check_id != '' }}
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           CHECK_ID: ${{ inputs.gate_check_id }}
           PR_NUMBER: ${{ inputs.pr_number }}
@@ -192,7 +213,7 @@ jobs:
         run: trusted-ci/.github/scripts/run_regression.sh llm_vlm
       - name: Upload regression logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: gpu-llm-vlm-${{ inputs.pr_number }}-${{ inputs.head_sha }}
           path: loongforge-artifacts
@@ -210,15 +231,32 @@ jobs:
       group: gpu-regression-${{ inputs.pr_number }}-embodied
       cancel-in-progress: true
     steps:
-      - name: Checkout trusted CI scripts
-        uses: actions/checkout@v4
+      - name: Revalidate current PR head
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          HEAD_REPO: ${{ inputs.head_repo }}
+          HEAD_SHA: ${{ inputs.head_sha }}
         with:
-          ref: ${{ github.ref }}
+          script: |
+            const { data: pull } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: Number(process.env.PR_NUMBER),
+            });
+            if (pull.head.sha !== process.env.HEAD_SHA ||
+                pull.head.repo?.full_name !== process.env.HEAD_REPO) {
+              core.setFailed('the requested revision is no longer the PR head');
+            }
+      - name: Checkout trusted CI scripts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
           path: trusted-ci
           persist-credentials: false
           submodules: false
       - name: Checkout immutable PR source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: ${{ inputs.head_repo }}
           ref: ${{ inputs.head_sha }}
@@ -237,7 +275,7 @@ jobs:
         run: trusted-ci/.github/scripts/self_runner/preflight.sh embodied "${{ inputs.build_image && 'true' || 'false' }}"
       - name: Report candidate image build
         if: ${{ inputs.build_image && inputs.gate_check_id != '' }}
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           CHECK_ID: ${{ inputs.gate_check_id }}
           PR_NUMBER: ${{ inputs.pr_number }}
@@ -262,10 +300,10 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           TREE_SHA: ${{ needs.validate.outputs.tree_sha }}
           SOURCE_DIR: ${{ github.workspace }}/source
-        run: trusted-ci/.github/scripts/build_candidate_image.sh p
+        run: trusted-ci/.github/scripts/build_candidate_image.sh auto
       - name: Report regression run
         if: ${{ inputs.gate_check_id != '' }}
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           CHECK_ID: ${{ inputs.gate_check_id }}
           PR_NUMBER: ${{ inputs.pr_number }}
@@ -308,7 +346,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
       - name: Upload regression logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: gpu-embodied-${{ inputs.pr_number }}-${{ inputs.head_sha }}
           path: loongforge-artifacts
@@ -329,14 +367,11 @@ jobs:
       checks: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
           persist-credentials: false
-      - id: cpu_checks
-        name: Read CPU check names
-        run: echo "names=$(jq -c '.' ci/cpu-checks.json)" >> "$GITHUB_OUTPUT"
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           CHECK_ID: ${{ inputs.gate_check_id }}
           VALIDATE_RESULT: ${{ needs.validate.result }}
@@ -345,50 +380,34 @@ jobs:
           SUITE: ${{ inputs.suite }}
           HEAD_SHA: ${{ inputs.head_sha }}
           PR_NUMBER: ${{ inputs.pr_number }}
-          CPU_CHECK_NAMES: ${{ steps.cpu_checks.outputs.names }}
           REGRESSION_SUMMARY: ${{ needs.embodied.outputs.regression_summary }}
         with:
           script: |
-            const {
-              selectLatestChecks,
-              shouldPollCpuChecks,
-            } = require('./.github/scripts/ci_checks');
+            const { gpuConclusion } = require('./.github/scripts/gpu_checks');
+            // CPU checks are aggregated by the static-checks workflow's gate
+            // job; this workflow reports the GPU suites only.
             const results = {
               validate: process.env.VALIDATE_RESULT,
               llm_vlm: process.env.LLM_VLM_RESULT,
               embodied: process.env.EMBODIED_RESULT,
             };
-            const requiredJobs = ['validate', process.env.SUITE];
-            const failed = requiredJobs.filter((name) => results[name] !== 'success');
 
-            // Expected CPU check names come from ci/cpu-checks.json so the
-            // finalize job and the CPU gate stay in sync.
-            const cpuNames = JSON.parse(process.env.CPU_CHECK_NAMES);
-            const pollCpuChecks = shouldPollCpuChecks(results, process.env.SUITE);
-            let latestCpuChecks = new Map();
-            if (pollCpuChecks) {
-              for (let attempt = 0; attempt < 120; attempt += 1) {
-                const checkRuns = await github.paginate(github.rest.checks.listForRef, {
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  ref: process.env.HEAD_SHA,
-                  per_page: 100,
-                });
-                latestCpuChecks = selectLatestChecks(checkRuns, cpuNames);
-                const terminal = cpuNames.every((name) =>
-                  latestCpuChecks.get(name)?.status === 'completed'
-                );
-                if (terminal) break;
-                await new Promise((resolve) => setTimeout(resolve, 30000));
-              }
-            }
-            const missingCpu = pollCpuChecks
-              ? cpuNames.filter((name) => latestCpuChecks.get(name)?.conclusion !== 'success')
-              : [];
-            failed.push(...missingCpu.map((name) => `cpu:${name}`));
-            const conclusion = pollCpuChecks
-              ? (failed.length ? 'failure' : 'success')
-              : 'cancelled';
+            // A failed suite job is a real failure: mark the check failed,
+            // fail this job, and post the result comment so the pull
+            // request shows why. A suite job that was cancelled mid-run
+            // keeps the cancelled conclusion (the author stopped it); a
+            // skipped suite (for example failed validation) is a failure.
+            const { conclusion, failed } = gpuConclusion(results, process.env.SUITE);
+            const regressionSummary = process.env.REGRESSION_SUMMARY.trim();
+            const checkOutput = {
+              title: conclusion === 'success'
+                ? 'GPU validation passed'
+                : (conclusion === 'cancelled' ? 'GPU validation cancelled' : 'GPU validation failed'),
+              summary: `Suite: ${process.env.SUITE}; results: ${JSON.stringify(results)}`,
+            };
+            // The Checks API rejects an explicit null output.text. Leave the
+            // optional field out when a suite failed before rendering results.
+            if (regressionSummary) checkOutput.text = regressionSummary;
             let checkId = Number(process.env.CHECK_ID);
             if (!Number.isSafeInteger(checkId) || checkId <= 0) {
               const { data: created } = await github.rest.checks.create({
@@ -399,6 +418,7 @@ jobs:
                 external_id: `loongforge-gpu:${process.env.PR_NUMBER}:${process.env.HEAD_SHA}`,
                 status: 'in_progress',
                 started_at: new Date().toISOString(),
+                details_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               });
               checkId = created.id;
             }
@@ -409,16 +429,15 @@ jobs:
               status: 'completed',
               conclusion,
               completed_at: new Date().toISOString(),
-              output: {
-                title: conclusion === 'success'
-                  ? 'GPU validation passed'
-                  : (conclusion === 'cancelled' ? 'GPU validation cancelled' : 'GPU validation failed'),
-                summary: `Suite: ${process.env.SUITE}; results: ${JSON.stringify(results)}`,
-                // Per-model regression detail (loss baseline comparisons,
-                // failed metrics, warnings) rendered by the suite runner.
-                // Markdown is supported in the check run output text.
-                text: process.env.REGRESSION_SUMMARY || null,
-              },
+              // The check run is created by a dispatch workflow whose commit
+              // differs from the pull request head, so GitHub files it under
+              // an unrelated check suite (for example the auto-label run).
+              // Point the details link at the real regression run.
+              details_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              // Per-model regression detail (loss baseline comparisons,
+              // failed metrics, warnings) is included when the suite runner
+              // reached its summary step.
+              output: checkOutput,
             });
 
             // Mirror the outcome as a pull request comment from the
@@ -436,7 +455,7 @@ jobs:
                 '',
                 `Verdict: **${conclusion}** · commit \`${process.env.HEAD_SHA.slice(0, 12)}\` · [workflow run](${runUrl})`,
                 '',
-                process.env.REGRESSION_SUMMARY || 'Per-model detail is unavailable for this suite.',
+                regressionSummary || 'Per-model detail is unavailable for this suite.',
               ].join('\n');
 
               const existing = await github.paginate(github.rest.issues.listComments, {

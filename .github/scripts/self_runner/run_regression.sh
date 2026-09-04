@@ -167,6 +167,22 @@ if [[ "$suite" == embodied ]]; then
       suite_results_copied=true
     fi
   fi
+  # Preserve the tail of each model's training log so a failed run can be
+  # diagnosed from the artifact alone (OOM tracebacks and elastic-agent
+  # failure summaries only appear in train.log, not in the suite log).
+  if [[ -n "$newest_results" && -d "$(dirname "$newest_results")" ]]; then
+    for train_log in "$(dirname "$newest_results")"/*/train.log; do
+      [[ -f "$train_log" ]] || continue
+      model_name="$(basename "$(dirname "$train_log")")"
+      train_tail_tmp="$artifact_dir/.train-${model_name}.$$"
+      if tail -c 65536 "$train_log" >"$train_tail_tmp" 2>/dev/null; then
+        python3 "$script_dir/../../../ci/redact_ci_artifact.py" \
+          --input "$train_tail_tmp" \
+          --output "$artifact_dir/train-${model_name}.log.tail" || true
+      fi
+      rm -f "$train_tail_tmp"
+    done
+  fi
 fi
 
 result_status=failed
