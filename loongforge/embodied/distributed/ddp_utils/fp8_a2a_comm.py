@@ -14,6 +14,7 @@ import logging
 
 import torch
 import torch.distributed as dist
+from torch.distributed.algorithms.ddp_comm_hooks.default_hooks import allreduce_hook
 
 try:
     import triton
@@ -24,7 +25,6 @@ except ImportError:  # pragma: no cover - guarded by require_triton().
 
 logger = logging.getLogger(__name__)
 
-E4M3_MAX = 448.0
 DEFAULT_BLOCK = 256
 # Buckets below this size fall back to plain AllReduce: two collectives plus four
 # kernels do not pay for themselves on a few MiB, and AllToAll efficiency drops
@@ -37,6 +37,9 @@ DEFAULT_MAX_SCRATCH_GB = 24.0
 # the quantization block size: a 220 MB bucket at BLOCK=256 would otherwise
 # need ~430k programs each touching only 256 elements.
 NUM_BLOCKS_PER_TILE = 8
+# Upper bound on ``block``: a program materializes NUM_BLOCKS_PER_TILE * block
+# fp32 values, so 1024 already costs 32 KiB of registers per program.
+MAX_BLOCK = 1024
 
 _BLOCK = DEFAULT_BLOCK
 _MIN_BYTES = int(DEFAULT_MIN_MIB * 2**20)
@@ -250,7 +253,7 @@ def _scratch_for(index, identity, numel, dtype, device, world_size, block, budge
         logger.info("fp8_a2a: bucket %d layout changed, reallocating scratch", index)
 
     need = _BucketScratch.plan(numel, dtype, world_size, block)[2]
-    if budget and _SCRATCH_BYTES + need > budget:
+    if _SCRATCH_BYTES + need > budget:
         # Degrade, do not abort. A bucket layout we cannot afford is a reason to
         # send this bucket at full precision, not to kill the training job: the
         # hook is an optimisation and every caller has a correct fallback. DDP's
@@ -329,8 +332,25 @@ def configure(block: int = DEFAULT_BLOCK, min_mib: float = DEFAULT_MIN_MIB,
     ``chunk_u8``.
     """
     global _BLOCK, _MIN_BYTES, _MAX_SCRATCH_BYTES
-    if block <= 0 or block % 2:
-        raise ValueError(f"ddp_comm_hook_fp8_block must be a positive even int, got {block}")
+    # Power of two because all three kernels index with tl.arange(0, BLOCK).
+    if block <= 0 or block & (block - 1):
+        raise ValueError(
+            f"ddp_comm_hook_fp8_block must be a positive power of two, got {block}"
+        )
+    # Each program holds an NUM_BLOCKS_PER_TILE x block fp32 tile in registers,
+    # so the usable ceiling is far below Triton's own tl.arange limit.
+    if block > MAX_BLOCK:
+        raise ValueError(
+            f"ddp_comm_hook_fp8_block must be <= {MAX_BLOCK}, got {block}"
+        )
+    if min_mib < 0:
+        raise ValueError(
+            f"ddp_comm_hook_fp8_min_mib must be >= 0, got {min_mib}"
+        )
+    if max_scratch_gb < 0:
+        raise ValueError(
+            f"ddp_comm_hook_fp8_max_scratch_gb must be >= 0, got {max_scratch_gb}"
+        )
     if block != _BLOCK:
         reset_scratch()
     _BLOCK = block
@@ -363,13 +383,8 @@ def fp8_a2a_allgather_hook(process_group, bucket):
     tensor = bucket.buffer()
     block, min_bytes, budget = _config()
 
-    def plain_allreduce():
-        tensor.div_(world_size)
-        work = dist.all_reduce(tensor, group=group, async_op=True)
-        return work.get_future().then(lambda fut: fut.value()[0])
-
     if world_size < 2 or tensor.nbytes < min_bytes:
-        return plain_allreduce()
+        return allreduce_hook(process_group, bucket)
 
     identity = (tensor.numel(), tensor.dtype, tensor.device, id(group), block)
     st = _scratch_for(
@@ -377,7 +392,7 @@ def fp8_a2a_allgather_hook(process_group, bucket):
         world_size, block, budget,
     )
     if st is None:
-        return plain_allreduce()
+        return allreduce_hook(process_group, bucket)
     S, chunk_u8 = st.S, st.chunk_u8
 
     quantize_chunks(tensor, st.send, st.numel, S, chunk_u8, world_size, block)

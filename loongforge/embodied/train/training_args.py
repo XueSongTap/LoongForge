@@ -1590,7 +1590,8 @@ class _DistributedArgs:
         default=256,
         metadata={
             "help": "fp8_a2a_allgather_hook only. Elements per fp8 quantization "
-                    "block, i.e. per fp32 scale. Smaller tracks the local dynamic "
+                    "block, i.e. per fp32 scale. Must be a power of two in "
+                    "[1, 1024]. Smaller tracks the local dynamic "
                     "range more tightly but costs 4/block extra bytes on the wire "
                     "(1.6% at 256)."
         },
@@ -1600,7 +1601,8 @@ class _DistributedArgs:
         metadata={
             "help": "fp8_a2a_allgather_hook only. Buckets smaller than this fall "
                     "back to plain AllReduce, since two collectives plus four "
-                    "kernels do not pay for themselves on a few MiB."
+                    "kernels do not pay for themselves on a few MiB. 0 quantizes "
+                    "every bucket."
         },
     )
     ddp_comm_hook_fp8_max_scratch_gb: float = field(
@@ -1609,7 +1611,9 @@ class _DistributedArgs:
             "help": "fp8_a2a_allgather_hook only. Total resident comm scratch "
                     "across all buckets, roughly 1.15x each bucket. Buckets that "
                     "do not fit degrade to full-precision AllReduce rather than "
-                    "failing the run."
+                    "failing the run, so 0 degrades every bucket and disables the "
+                    "hook. Raise it to quantize more buckets; there is no value "
+                    "that removes the cap."
         },
     )
     dynamo_optimize_ddp: bool = field(
