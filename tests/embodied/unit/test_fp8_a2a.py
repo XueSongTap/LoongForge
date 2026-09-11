@@ -12,6 +12,7 @@ pass on a layout that merely shuffles blocks.
 
 from __future__ import annotations
 
+import inspect
 import tempfile
 
 import pytest
@@ -106,8 +107,44 @@ def test_changing_block_drops_stale_scratch():
     assert not mod._SCRATCH
 
 # --------------------------------------------------------------------------
+# validate_runtime(): preflight once at install time, not once per bucket
+# --------------------------------------------------------------------------
+
+def test_validate_runtime_rejects_cpu():
+    with pytest.raises(RuntimeError, match="requires a CUDA device"):
+        mod.validate_runtime(torch.device("cpu"), "cpu:gloo,cuda:nccl")
+
+
+def test_validate_runtime_names_the_ddp_flag():
+    """The message must name the option the user passed, not the FSDP one."""
+    with pytest.raises(RuntimeError, match=r"--ddp-comm-hook fp8_a2a_allgather_hook"):
+        mod.validate_runtime(torch.device("cpu"), "gloo")
+
+
+def test_hook_does_not_preflight_per_bucket():
+    """The old require_triton() ran once per bucket per step inside the reducer."""
+    src = inspect.getsource(mod.fp8_a2a_allgather_hook)
+    assert "validate_runtime" not in src
+    assert not hasattr(mod, "require_triton")
+
+
+@requires_cuda
+def test_validate_runtime_rejects_gloo_on_cuda():
+    with pytest.raises(RuntimeError, match="requires the NCCL backend"):
+        mod.validate_runtime(torch.device("cuda", 0), "gloo")
+
+
+@requires_cuda
+@pytest.mark.parametrize("backend", ["nccl", "cpu:gloo,cuda:nccl", "CUDA:NCCL"])
+def test_validate_runtime_accepts_every_nccl_spelling(backend):
+    """ctx.backend is device-scoped, so the resolver has to handle both forms."""
+    mod.validate_runtime(torch.device("cuda", 0), backend)
+
+
+# --------------------------------------------------------------------------
 # plan(): the layout arithmetic, without allocating
 # --------------------------------------------------------------------------
+
 
 def test_plan_layout_matches_the_documented_formula():
     block, world_size = 256, 8

@@ -19,7 +19,7 @@ from torch.distributed.algorithms.ddp_comm_hooks.default_hooks import allreduce_
 try:
     import triton
     import triton.language as tl
-except ImportError:  # pragma: no cover - guarded by require_triton().
+except ImportError:  # pragma: no cover - guarded by validate_runtime().
     triton = None
     tl = None
 
@@ -46,13 +46,57 @@ _MIN_BYTES = int(DEFAULT_MIN_MIB * 2**20)
 _MAX_SCRATCH_BYTES = int(DEFAULT_MAX_SCRATCH_GB * 2**30)
 
 
-def require_triton() -> None:
-    """Raise if the FP8 AllToAll kernels cannot run."""
-    if triton is None:
-        raise RuntimeError("fp8_a2a_allgather_hook requires Triton to be installed")
-    if tl is None or not hasattr(tl, "float8e4nv"):
+FLAG = "--ddp-comm-hook fp8_a2a_allgather_hook"
+
+
+def validate_runtime(device, backend: str) -> None:
+    """Fail at install time when the FP8 AllToAll kernels cannot run.
+
+    Called once from ``parallel.py`` before the hook is registered. Checking
+    here rather than inside the hook means a CPU run, a gloo run, or a pre-Ada
+    GPU fails before the model and dataloader are built, instead of surfacing as
+    a Triton compile error from inside the DDP reducer at the first backward.
+    """
+    device = torch.device(device)
+    entries = [e.strip() for e in str(backend).lower().split(",") if e.strip()]
+    scoped = dict(e.rsplit(":", 1) for e in entries if ":" in e)
+    plain = next((e for e in entries if ":" not in e), "")
+    resolved = scoped.get(device.type, plain)
+    context = f"device={device}, backend={str(backend).lower()}"
+
+    if device.type != "cuda" or not torch.cuda.is_available():
+        raise RuntimeError(f"{FLAG} requires a CUDA device; got {context}")
+    if resolved != "nccl":
         raise RuntimeError(
-            "fp8_a2a_allgather_hook requires the Triton FP8 type tl.float8e4nv"
+            f"{FLAG} requires the NCCL backend; got {context} "
+            f"(resolved {device.type}:{resolved or 'unknown'})"
+        )
+    if triton is None or tl is None or not hasattr(tl, "float8e4nv"):
+        raise RuntimeError(
+            f"{FLAG} requires Triton with the FP8 type tl.float8e4nv; got {context}"
+        )
+    if not hasattr(torch, "float8_e4m3fn"):
+        raise RuntimeError(f"{FLAG} requires PyTorch FP8 E4M3 support; got {context}")
+    # tl.float8e4nv needs Ada or newer. On cc 8.0 the import and the type both
+    # look fine, and only Triton's first compile -- i.e. the first backward --
+    # fails, which is the late failure this function exists to move forward.
+    capability = torch.cuda.get_device_capability(device)
+    if capability < (8, 9):
+        raise RuntimeError(
+            f"{FLAG} requires compute capability >= 8.9 for tl.float8e4nv; "
+            f"got {capability} ({context})"
+        )
+    try:
+        target = triton.runtime.driver.active.get_current_target()
+        triton_backend = str(target.backend).lower()
+    except Exception as exc:
+        raise RuntimeError(
+            f"Unable to initialize Triton's CUDA backend for {FLAG} ({context})"
+        ) from exc
+    if triton_backend != "cuda":
+        raise RuntimeError(
+            f"{FLAG} requires Triton's CUDA backend; "
+            f"got triton_backend={triton_backend!r} ({context})"
         )
 
 
@@ -377,7 +421,6 @@ def fp8_a2a_allgather_hook(process_group, bucket):
     the AllToAll efficiency drops off below ~64 MiB per rank. Buckets whose
     scratch does not fit the budget take the same fallback.
     """
-    require_triton()
     group = process_group if process_group is not None else dist.group.WORLD
     world_size = dist.get_world_size(group)
     tensor = bucket.buffer()

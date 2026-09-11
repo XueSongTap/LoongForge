@@ -227,6 +227,10 @@ def _wrap_ddp(model: nn.Module, training_args, ctx: DistributedContext, dtype: t
     ddp_model = DDP(model, **filter_kwargs(DDP, ddp_kwargs))
     if training_args.ddp_comm_hook:
         if training_args.ddp_comm_hook == "fp8_a2a_allgather_hook":
+            # Preflight here, not in the hook: an unsupported device, backend or
+            # compute capability would otherwise only surface as a Triton
+            # compile error inside the reducer at the first backward.
+            fp8_a2a_comm.validate_runtime(ctx.device, ctx.backend)
             # DDP fixes the comm-hook signature at (state, bucket), so the hook's
             # tunables are applied to the module before it is registered.
             fp8_a2a_comm.configure(
