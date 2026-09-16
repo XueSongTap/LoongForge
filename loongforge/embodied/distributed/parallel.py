@@ -237,6 +237,7 @@ def _wrap_ddp(model: nn.Module, training_args, ctx: DistributedContext, dtype: t
                 block=training_args.ddp_comm_hook_fp8_block,
                 min_mib=training_args.ddp_comm_hook_fp8_min_mib,
                 max_scratch_gb=training_args.ddp_comm_hook_fp8_max_scratch_gb,
+                error_feedback=training_args.ddp_comm_hook_fp8_error_feedback,
             )
         comm_hook = resolve_comm_hook(
             training_args.ddp_comm_hook,

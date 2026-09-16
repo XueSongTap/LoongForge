@@ -44,6 +44,26 @@ MAX_BLOCK = 1024
 _BLOCK = DEFAULT_BLOCK
 _MIN_BYTES = int(DEFAULT_MIN_MIB * 2**20)
 _MAX_SCRATCH_BYTES = int(DEFAULT_MAX_SCRATCH_GB * 2**30)
+# Error feedback: carry each quantization point's residual into the next step.
+# Off by default; see EF_MODES for what each mode costs.
+_ERROR_FEEDBACK = "none"
+# "allgather" only keeps the shard residual, which is 1/world_size of a bucket.
+# Measurement (experiment 3) puts 1.8 of the 2.9% end-to-end relative RMS on the
+# AllGather requantization and the rest on the AllToAll one, so this mode buys
+# the larger half of the error at 1/9 of the memory and of the residual work.
+EF_MODES = ("none", "allgather", "both")
+# Residuals are kept in fp32, not bf16. It is tempting to halve them: a residual
+# is ~3% of the gradient, so bf16's 2^-8 relative step is only ~1e-4 of a
+# gradient -- seemingly three decades below the fp8 error being corrected. That
+# per-step view is wrong, and measurably so: storing the residual in bf16 pushed
+# the 300-step accumulated bias from +0.40% back to +3.41% (baseline reference),
+# nearly the +4.19% of no error feedback at all. The reason is that EF's job is
+# to stop *systematic* drift, and the fp8 residual is systematically signed, so
+# rounding it each step contributes a same-sign term that does not telescope and
+# accumulates ~linearly over the run -- a smaller copy of the exact drift EF
+# removes. The correction has to be carried at higher precision than the error.
+EF_DTYPE = torch.float32
+_ACCELERATOR_ERROR = getattr(torch, "AcceleratorError", RuntimeError)
 
 
 FLAG = "--ddp-comm-hook fp8_a2a_allgather_hook"
@@ -139,11 +159,20 @@ if triton is not None:
         x = tl.load(X + idx, mask=idx < numel, other=0.0).to(tl.float32)
         amax = tl.max(tl.abs(x), axis=1)
         scale = amax / 448.0  # E4M3_MAX; Triton cannot read non-constexpr globals
-        inv = tl.where(scale > 0.0, 1.0 / scale, 0.0)
+        # Guard on the normal range, not on zero: a denormal scale makes
+        # ``1 / scale`` overflow to +inf, every non-zero element of the block
+        # convert to fp8 NaN, and (with error feedback) that NaN latch into the
+        # residual forever. Flushing such a block costs nothing -- its largest
+        # element is below 5e-36, i.e. 27 decades under a typical gradient.
+        # Error feedback reaches this range on its own: a block whose gradient
+        # stays zero keeps requantizing its own residual, which shrinks by
+        # ~2% per step and lands in the denormals after a dozen steps.
+        inv = tl.where(scale > 1.1754944e-38, 1.0 / scale, 0.0)
         q = (x * inv[:, None]).to(tl.float8e4nv)
 
         tl.store(OUT_U8 + chunk * chunk_u8 + within, q.to(tl.uint8, bitcast=True))
-        tl.store(OUT_F32 + chunk * chunk_f32 + scale_base_f32 + blk0 + ob, scale)
+        tl.store(OUT_F32 + chunk * chunk_f32 + scale_base_f32 + blk0 + ob,
+                 tl.where(inv > 0.0, scale, 0.0))
 
     @triton.jit
     def _dequant_reduce_kernel(
@@ -208,6 +237,47 @@ if triton is not None:
         idx = chunk * S + within
         tl.store(OUT + idx, d * sc[:, None], mask=idx < numel)
 
+    @triton.jit
+    def _ef_residual_kernel(
+        Q_U8,
+        Q_F32,
+        VALUE,                  # what was quantized: gradient + previous residual
+        RES,                    # residual, numel elements, any float dtype
+        numel,
+        S,
+        chunk_u8,
+        chunk_f32,
+        scale_base_f32,
+        tiles_per_chunk,
+        BLOCK: tl.constexpr,
+        NB: tl.constexpr,
+    ):
+        """Close one error-feedback step: ``residual = value - dequant(q)``.
+
+        Same dataflow as ``_dequant_scatter_kernel`` plus one read of ``VALUE``,
+        which is what makes this worth its own kernel: dequantizing into ``RES``
+        and then fixing it up with ``neg_()``/``add_()`` costs two extra
+        full-bucket round trips through HBM per quantization point, and the
+        residual is bucket-sized. Keeping the subtraction inside the same program
+        also decouples ``RES``'s dtype from the arithmetic: the difference is
+        formed in fp32 regardless of how ``RES`` is stored.
+        """
+        pid = tl.program_id(0).to(tl.int64)
+        chunk = pid // tiles_per_chunk
+        blk0 = (pid % tiles_per_chunk) * NB
+
+        ob = tl.arange(0, NB).to(tl.int64)
+        oe = tl.arange(0, BLOCK).to(tl.int64)
+        within = (blk0 + ob)[:, None] * BLOCK + oe[None, :]
+
+        q = tl.load(Q_U8 + chunk * chunk_u8 + within)
+        d = q.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+        sc = tl.load(Q_F32 + chunk * chunk_f32 + scale_base_f32 + blk0 + ob)
+        idx = chunk * S + within
+        mask = idx < numel
+        v = tl.load(VALUE + idx, mask=mask, other=0.0).to(tl.float32)
+        tl.store(RES + idx, v - d * sc[:, None], mask=mask)
+
 
 class _BucketScratch:
     """Persistent per-bucket scratch, keyed by bucket identity.
@@ -233,10 +303,11 @@ class _BucketScratch:
     it.
     """
 
-    __slots__ = ("send", "recv", "shard", "S", "chunk_u8", "tiles_per_chunk",
-                 "numel", "identity")
+    __slots__ = ("send", "recv", "shard", "res1", "res2", "S", "chunk_u8",
+                 "tiles_per_chunk", "numel", "identity")
 
-    def __init__(self, identity, numel: int, dtype, device, world_size, block):
+    def __init__(self, identity, numel: int, dtype, device, world_size, block,
+                 error_feedback="none"):
         self.S, self.chunk_u8, _ = self.plan(numel, dtype, world_size, block)
         self.numel = numel
         self.identity = identity
@@ -247,8 +318,19 @@ class _BucketScratch:
         self.recv = torch.empty(total, dtype=torch.uint8, device=device)
         self.shard = torch.empty(self.S, dtype=dtype, device=device)
 
+        # Error-feedback residuals, one per quantization point. These are the
+        # only state this hook carries across steps, so they deliberately live
+        # with the scratch: _scratch_for drops the whole object when the bucket
+        # layout changes, and a residual held against a stale
+        # parameter-to-offset mapping would inject a full bucket of noise.
+        self.res1 = self.res2 = None
+        if error_feedback == "both":
+            self.res1 = torch.zeros(numel, dtype=EF_DTYPE, device=device)
+        if error_feedback in ("both", "allgather"):
+            self.res2 = torch.zeros(self.S, dtype=EF_DTYPE, device=device)
+
     @staticmethod
-    def plan(numel: int, dtype, world_size: int, block: int):
+    def plan(numel: int, dtype, world_size: int, block: int, error_feedback="none"):
         """Size the scratch without allocating it.
 
         Kept as the single source of truth for the layout so the budget check
@@ -261,10 +343,16 @@ class _BucketScratch:
         per_rank = (numel + world_size - 1) // world_size
         S = (per_rank + align - 1) // align * align
         chunk_u8 = S + 4 * (S // block)
-        return S, chunk_u8, 2 * world_size * chunk_u8 + S * dtype.itemsize
+        total = 2 * world_size * chunk_u8 + S * dtype.itemsize
+        if error_feedback == "both":
+            total += (numel + S) * EF_DTYPE.itemsize
+        elif error_feedback == "allgather":
+            total += S * EF_DTYPE.itemsize
+        return S, chunk_u8, total
 
     def bytes(self) -> int:
-        return self.send.numel() + self.recv.numel() + self.shard.nbytes
+        residual = sum(r.nbytes for r in (self.res1, self.res2) if r is not None)
+        return self.send.numel() + self.recv.numel() + self.shard.nbytes + residual
 
 
 _SCRATCH: dict[int, _BucketScratch] = {}
@@ -274,7 +362,8 @@ _SCRATCH_BYTES = 0
 _OVER_BUDGET: set[int] = set()
 
 
-def _scratch_for(index, identity, numel, dtype, device, world_size, block, budget):
+def _scratch_for(index, identity, numel, dtype, device, world_size, block, budget,
+                 error_feedback="none"):
     """Get or (re)allocate scratch for one bucket, keyed by bucket index.
 
     Keyed by ``bucket.index()`` rather than by full identity so that DDP's
@@ -282,9 +371,11 @@ def _scratch_for(index, identity, numel, dtype, device, world_size, block, budge
     of accumulating a second full generation of it (~14 GiB each at
     bucket_cap_mb=200).
 
-    Rebuild is otherwise harmless here: these are pure scratch buffers with no
-    state carried across steps, so a changed parameter-to-offset mapping cannot
-    silently corrupt anything.
+    Rebuild is otherwise harmless here: the comm buffers are pure scratch with
+    no state carried across steps, so a changed parameter-to-offset mapping
+    cannot silently corrupt anything. The error-feedback residuals *are* state,
+    which is why they are allocated as part of this object and therefore
+    discarded by the same reallocation.
     """
     global _SCRATCH_BYTES
     scratch = _SCRATCH.get(index)
@@ -296,7 +387,7 @@ def _scratch_for(index, identity, numel, dtype, device, world_size, block, budge
         del scratch
         logger.info("fp8_a2a: bucket %d layout changed, reallocating scratch", index)
 
-    need = _BucketScratch.plan(numel, dtype, world_size, block)[2]
+    need = _BucketScratch.plan(numel, dtype, world_size, block, error_feedback)[2]
     if _SCRATCH_BYTES + need > budget:
         # Degrade, do not abort. A bucket layout we cannot afford is a reason to
         # send this bucket at full precision, not to kill the training job: the
@@ -314,7 +405,8 @@ def _scratch_for(index, identity, numel, dtype, device, world_size, block, budge
             )
         return None
 
-    scratch = _BucketScratch(identity, numel, dtype, device, world_size, block)
+    scratch = _BucketScratch(identity, numel, dtype, device, world_size, block,
+                             error_feedback)
     _SCRATCH[index] = scratch
     _SCRATCH_BYTES += scratch.bytes()
     logger.info(
@@ -364,18 +456,36 @@ def dequant_scatter(ag_u8, out, numel, S, chunk_u8, num_chunks, block):
     )
 
 
+def ef_residual(quantized, residual, value, numel, S, chunk_u8, num_chunks, block):
+    """Close one error-feedback step: ``residual = value - dequant(quantized)``.
+
+    ``value`` already holds ``gradient + previous residual`` and ``quantized``
+    its fp8 form. One kernel, one pass: the residual is bucket-sized, so folding
+    the subtraction into the dequantization instead of post-processing it saves
+    two full-bucket HBM round trips per quantization point.
+    """
+    tiles_per_chunk = S // (block * NUM_BLOCKS_PER_TILE)
+    _ef_residual_kernel[(num_chunks * tiles_per_chunk,)](
+        quantized, quantized.view(torch.float32), value, residual,
+        numel, S, chunk_u8, chunk_u8 // 4, S // 4, tiles_per_chunk,
+        BLOCK=block, NB=NUM_BLOCKS_PER_TILE,
+    )
+
+
 def configure(block: int = DEFAULT_BLOCK, min_mib: float = DEFAULT_MIN_MIB,
-              max_scratch_gb: float = DEFAULT_MAX_SCRATCH_GB) -> None:
+              max_scratch_gb: float = DEFAULT_MAX_SCRATCH_GB,
+              error_feedback: str = "none") -> None:
     """Set the hook's tunables. Called once from ``parallel.py`` at install time.
 
     DDP fixes the comm-hook signature at ``(state, bucket)``, so the knobs cannot
     be passed per call and have to live in module state.
 
-    Changing ``block`` changes the wire layout, so any scratch allocated under
-    the previous value is dropped rather than silently reused with a stale
-    ``chunk_u8``.
+    Changing ``block`` changes the wire layout and changing ``error_feedback``
+    changes which buffers exist, so any scratch allocated under the previous
+    value is dropped rather than silently reused with a stale ``chunk_u8`` or a
+    missing residual.
     """
-    global _BLOCK, _MIN_BYTES, _MAX_SCRATCH_BYTES
+    global _BLOCK, _MIN_BYTES, _MAX_SCRATCH_BYTES, _ERROR_FEEDBACK
     # Power of two because all three kernels index with tl.arange(0, BLOCK).
     if block <= 0 or block & (block - 1):
         raise ValueError(
@@ -395,18 +505,50 @@ def configure(block: int = DEFAULT_BLOCK, min_mib: float = DEFAULT_MIN_MIB,
         raise ValueError(
             f"ddp_comm_hook_fp8_max_scratch_gb must be >= 0, got {max_scratch_gb}"
         )
-    if block != _BLOCK:
+    if error_feedback not in EF_MODES:
+        raise ValueError(
+            f"ddp_comm_hook_fp8_error_feedback must be one of {EF_MODES}, "
+            f"got {error_feedback!r}"
+        )
+    if block != _BLOCK or error_feedback != _ERROR_FEEDBACK:
         reset_scratch()
     _BLOCK = block
     _MIN_BYTES = int(min_mib * 2**20)
     _MAX_SCRATCH_BYTES = int(max_scratch_gb * 2**30)
+    _ERROR_FEEDBACK = error_feedback
     logger.info(
-        "fp8_a2a: block=%d min_mib=%g max_scratch_gb=%g", block, min_mib, max_scratch_gb
+        "fp8_a2a: block=%d min_mib=%g max_scratch_gb=%g error_feedback=%s",
+        block, min_mib, max_scratch_gb, _ERROR_FEEDBACK,
     )
 
 
 def _config():
-    return _BLOCK, _MIN_BYTES, _MAX_SCRATCH_BYTES
+    return _BLOCK, _MIN_BYTES, _MAX_SCRATCH_BYTES, _ERROR_FEEDBACK
+
+
+def _is_cuda_graph_capturing() -> bool:
+    """Return whether the current CUDA stream is inside graph capture.
+
+    The normal hook path deliberately uses NCCL ``Work`` futures so gradient
+    communication can overlap the rest of backward.  A future continuation is
+    not capture-safe, though: its callback can run on a host progress thread
+    (and therefore launch work on a different stream), leaving the capture
+    stream with unjoined work.  Capture mode uses the synchronous enqueue path
+    below, which keeps every operation on the stream being captured.
+    """
+    try:
+        return bool(torch.cuda.is_current_stream_capturing())
+    except (RuntimeError, _ACCELERATOR_ERROR):
+        # This can be queried before CUDA has been initialized on a few PyTorch
+        # builds.  In that case the eager path is the only possible path.
+        return False
+
+
+def _completed_future(tensor):
+    """Return a DDP-compatible Future already resolved to ``tensor``."""
+    result = torch.futures.Future()
+    result.set_result(tensor)
+    return result
 
 
 def fp8_a2a_allgather_hook(process_group, bucket):
@@ -424,7 +566,7 @@ def fp8_a2a_allgather_hook(process_group, bucket):
     group = process_group if process_group is not None else dist.group.WORLD
     world_size = dist.get_world_size(group)
     tensor = bucket.buffer()
-    block, min_bytes, budget = _config()
+    block, min_bytes, budget, error_feedback = _config()
 
     if world_size < 2 or tensor.nbytes < min_bytes:
         return allreduce_hook(process_group, bucket)
@@ -432,13 +574,66 @@ def fp8_a2a_allgather_hook(process_group, bucket):
     identity = (tensor.numel(), tensor.dtype, tensor.device, id(group), block)
     st = _scratch_for(
         bucket.index(), identity, tensor.numel(), tensor.dtype, tensor.device,
-        world_size, block, budget,
+        world_size, block, budget, error_feedback,
     )
     if st is None:
         return allreduce_hook(process_group, bucket)
     S, chunk_u8 = st.S, st.chunk_u8
 
-    quantize_chunks(tensor, st.send, st.numel, S, chunk_u8, world_size, block)
+    def quantize_send():
+        """Quantize the bucket into ``st.send``, applying error feedback first.
+
+        ``tensor`` is safe to modify in place: it is the bucket buffer, and the
+        AllGather result overwrites it wholesale at the end of the hook.
+        """
+        if st.res1 is not None:
+            tensor.add_(st.res1)
+        quantize_chunks(tensor, st.send, st.numel, S, chunk_u8, world_size, block)
+        if st.res1 is not None:
+            ef_residual(st.send, st.res1, tensor, st.numel, S, chunk_u8,
+                        world_size, block)
+
+    def quantize_shard():
+        """Requantize the averaged shard for the AllGather, with error feedback.
+
+        Each rank reduces only its own chunk, so ``res2`` is legitimately
+        per-rank state; every rank still receives every quantized chunk, so the
+        final bucket stays bit-identical across ranks.
+        """
+        if st.res2 is not None:
+            st.shard.add_(st.res2)
+        ag_send = st.send[:chunk_u8]
+        quantize_chunks(st.shard, ag_send, S, S, chunk_u8, 1, block)
+        if st.res2 is not None:
+            ef_residual(ag_send, st.res2, st.shard, S, S, chunk_u8, 1, block)
+        return ag_send
+
+    def launch_allgather(async_op):
+        """Second collective: requantize the reduced shard and gather it as fp8.
+        Returns the NCCL Work (or None if sync)."""
+        ag_send = quantize_shard()
+        return dist.all_gather_into_tensor(
+            st.recv, ag_send, group=group, async_op=async_op
+        )
+
+    def finish_allgather():
+        """Write the gathered shards back into the bucket, in shard order."""
+        dequant_scatter(st.recv, tensor, st.numel, S, chunk_u8, world_size, block)
+
+    if _is_cuda_graph_capturing():
+        # CUDA Graph capture cannot join the host-side continuation chain used
+        # by the overlap path.  Enqueue the complete dataflow on the capture
+        # stream and hand DDP an already-resolved Future; NCCL's synchronous
+        # Python API waits only for enqueue completion, while stream ordering
+        # preserves the dependencies between each operation.
+        quantize_send()
+        dist.all_to_all_single(st.recv, st.send, group=group, async_op=False)
+        dequant_reduce(st.recv, st.shard, S, chunk_u8, world_size, block)
+        launch_allgather(async_op=False)
+        finish_allgather()
+        return _completed_future(tensor)
+
+    quantize_send()
     a2a = dist.all_to_all_single(st.recv, st.send, group=group, async_op=True)
 
     result = torch.futures.Future()
@@ -448,11 +643,7 @@ def fp8_a2a_allgather_hook(process_group, bucket):
             fut.wait()
             # fp32 accumulate across ranks, divide by world_size, requantize.
             dequant_reduce(st.recv, st.shard, S, chunk_u8, world_size, block)
-            ag_send = st.send[:chunk_u8]
-            quantize_chunks(st.shard, ag_send, S, S, chunk_u8, 1, block)
-            work = dist.all_gather_into_tensor(
-                st.recv, ag_send, group=group, async_op=True
-            )
+            work = launch_allgather(async_op=True)
         except Exception as exc:
             result.set_exception(exc)
             return
@@ -460,9 +651,7 @@ def fp8_a2a_allgather_hook(process_group, bucket):
         def after_ag(fut):
             try:
                 fut.wait()
-                dequant_scatter(
-                    st.recv, tensor, st.numel, S, chunk_u8, world_size, block
-                )
+                finish_allgather()
                 result.set_result(tensor)
             except Exception as exc:
                 result.set_exception(exc)
@@ -471,7 +660,3 @@ def fp8_a2a_allgather_hook(process_group, bucket):
 
     a2a.get_future().then(after_a2a)
     return result
-
-
-
-
