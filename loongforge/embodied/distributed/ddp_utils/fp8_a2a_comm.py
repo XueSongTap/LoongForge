@@ -11,6 +11,7 @@ Replaces DDP's bf16 ring AllReduce with
 from __future__ import annotations
 
 import logging
+import os
 
 import torch
 import torch.distributed as dist
@@ -67,6 +68,172 @@ _ACCELERATOR_ERROR = getattr(torch, "AcceleratorError", RuntimeError)
 
 
 FLAG = "--ddp-comm-hook fp8_a2a_allgather_hook"
+
+
+# ── Selective-precision exemption (FP8_A2A_EXEMPT) ───────────────────────────
+# id(param) -> qualified name, populated at DDP-wrap time so the comm hook can
+# attribute each slice of a bucket buffer to its parameter and decide, per
+# element, whether to keep it in exact precision instead of quantizing it.
+_PARAM_NAMES: dict[int, str] = {}
+# Per-bucket cache of the exempt element indices (LongTensor on device) and a
+# one-time layout log guard.
+_EXEMPT_IDX: dict[int, "tuple[int, torch.Tensor | None]"] = {}
+_LAYOUT_LOGGED: set[int] = set()
+# Persistent per-bucket buffers for the exempt reduce, so the snapshot/all-reduce
+# allocate nothing per step and the whole exempt correction is CUDA-graph
+# capture-safe. Keyed by bucket index, rebuilt when the exempt count changes.
+_EXEMPT_BUF: dict[int, "tuple[torch.Tensor, torch.Tensor]"] = {}
+
+
+def set_param_names(model) -> None:
+    """Record id(param) -> name for the model DDP is about to wrap.
+
+    Called from ``parallel.py`` before the comm hook is registered. The comm
+    hook only receives ``(state, bucket)``; matching ``bucket.parameters()`` back
+    to names needs this map built while the model is still in hand.
+    """
+    _PARAM_NAMES.clear()
+    _EXEMPT_IDX.clear()
+    _EXEMPT_BUF.clear()
+    _LAYOUT_LOGGED.clear()
+    for name, param in model.named_parameters():
+        _PARAM_NAMES[id(param)] = name
+
+
+def _exempt_spec():
+    """Parse ``FP8_A2A_EXEMPT``: comma list of {1d,embed,head}. Empty -> off."""
+    raw = os.environ.get("FP8_A2A_EXEMPT", "").strip()
+    if not raw:
+        return None
+    return {tok.strip() for tok in raw.split(",") if tok.strip()}
+
+
+def _is_exempt(name: str, param, spec) -> bool:
+    """Decide whether a parameter is kept in exact precision.
+
+    ``1d``    -> every 1-D tensor (RMSNorm/LayerNorm scales, biases): tiny byte
+                 count, high loss sensitivity (they scale activations directly).
+    ``embed`` -> names containing 'embed' (token/patch embeddings).
+    ``head``  -> names containing 'lm_head'/'output'/'head' (the un-embedding).
+    """
+    if spec is None:
+        return False
+    if "1d" in spec and param.dim() <= 1:
+        return True
+    lname = name.lower()
+    if "embed" in spec and "embed" in lname:
+        return True
+    if "head" in spec and ("lm_head" in lname or "head" in lname or ".output" in lname):
+        return True
+    return False
+
+
+def _bucket_param_slices(bucket):
+    """Yield (name, param, offset, numel) for each param in the bucket buffer.
+
+    Offsets come from comparing each gradient view's data_ptr against the buffer
+    base, so alignment padding between params is handled exactly rather than
+    assumed contiguous.
+    """
+    buffer = bucket.buffer()
+    base = buffer.data_ptr()
+    esize = buffer.element_size()
+    params = bucket.parameters()
+    grads = bucket.gradients()
+    for param, grad in zip(params, grads):
+        name = _PARAM_NAMES.get(id(param), f"<unknown@{id(param)}>")
+        offset = (grad.data_ptr() - base) // esize
+        yield name, param, offset, grad.numel()
+
+
+def _log_bucket_layout(bucket) -> None:
+    """One-time per-bucket dump of param name/shape/offset/exempt-flag.
+
+    Gated by ``FP8_A2A_LAYOUT_LOG``. Prints an aggregate exempt byte fraction so
+    the selective-precision cost can be read straight from the log.
+    """
+    if not os.environ.get("FP8_A2A_LAYOUT_LOG"):
+        return
+    index = bucket.index()
+    if index in _LAYOUT_LOGGED:
+        return
+    _LAYOUT_LOGGED.add(index)
+    spec = _exempt_spec()
+    total = exempt = 0
+    lines = []
+    for name, param, offset, numel in _bucket_param_slices(bucket):
+        ex = _is_exempt(name, param, spec)
+        total += numel
+        if ex:
+            exempt += numel
+        lines.append(
+            f"    off={offset:>10d} numel={numel:>10d} dim={param.dim()} "
+            f"exempt={int(ex)} {name} {tuple(param.shape)}"
+        )
+    frac = exempt / total if total else 0.0
+    logger.info(
+        "fp8_a2a layout: bucket=%d params=%d numel=%d exempt_numel=%d (%.4f%%)\n%s",
+        index, len(lines), total, exempt, frac * 100.0, "\n".join(lines),
+    )
+
+
+def _exempt_indices(bucket, device):
+    """Return a cached LongTensor of buffer positions kept in exact precision.
+
+    Built per bucket index from the parameter slices; ``None`` when the
+    exemption is off or the bucket has no exempt element. The reduction keeps
+    these positions at fp32 mean (a small extra AllReduce) and quantizes the
+    rest, so sensitive 1-D scales / embeddings never take the fp8 rounding.
+
+    The cache stores the buffer ``numel`` alongside the index tensor and
+    rebuilds on mismatch, mirroring ``_scratch_for``'s ``identity`` guard: DDP
+    reuses ``bucket.index() == 0`` for both the fused iteration-0 buffer
+    (~1.6e9 elements) and the far smaller steady-state bucket after rebuild, so
+    a cache keyed on index alone would hand the small buffer offsets past its
+    end and trip the scatter/gather bounds assert.
+    """
+    index = bucket.index()
+    buf_numel = bucket.buffer().numel()
+    cached = _EXEMPT_IDX.get(index)
+    if cached is not None and cached[0] == buf_numel:
+        return cached[1]
+    spec = _exempt_spec()
+    if spec is None:
+        _EXEMPT_IDX[index] = (buf_numel, None)
+        return None
+    ranges = []
+    for name, param, offset, numel in _bucket_param_slices(bucket):
+        if _is_exempt(name, param, spec):
+            ranges.append(torch.arange(offset, offset + numel, device=device))
+    idx = torch.cat(ranges) if ranges else None
+    _EXEMPT_IDX[index] = (buf_numel, idx)
+    return idx
+
+
+def _exempt_buffers(index, n, dtype, device):
+    """Persistent (gather, fp32) buffers for the capture-safe exempt reduce.
+
+    ``gather`` matches the bucket dtype and receives ``index_select(out=...)``;
+    ``fp32`` is the AllReduce buffer (the exempt mean is always accumulated in
+    fp32, matching the fp8 path's fp32 reduce). The two alias when the bucket is
+    already fp32. Cached per bucket index and rebuilt when the exempt count
+    changes, mirroring ``_scratch_for`` / ``_exempt_indices``: DDP reuses
+    ``bucket.index() == 0`` for the fused iteration-0 buffer and the smaller
+    steady-state bucket, so a stale-length buffer would misalign the copy.
+
+    Allocating these once (instead of ``index_select().float()`` per step) is
+    what lets the exempt correction be captured into a CUDA graph: capture
+    forbids fresh allocations on the capture stream.
+    """
+    buf = _EXEMPT_BUF.get(index)
+    if buf is None or buf[0].numel() != n:
+        gather = torch.empty(n, dtype=dtype, device=device)
+        fp32 = gather if dtype == torch.float32 else torch.empty(
+            n, dtype=torch.float32, device=device
+        )
+        buf = (gather, fp32)
+        _EXEMPT_BUF[index] = buf
+    return buf
 
 
 def validate_runtime(device, backend: str) -> None:
@@ -424,6 +591,7 @@ def reset_scratch() -> None:
     _SCRATCH.clear()
     _SCRATCH_BYTES = 0
     _OVER_BUDGET.clear()
+    _EXEMPT_BUF.clear()
 
 
 def quantize_chunks(x, out_u8, numel, S, chunk_u8, num_chunks, block):
@@ -566,6 +734,7 @@ def fp8_a2a_allgather_hook(process_group, bucket):
     group = process_group if process_group is not None else dist.group.WORLD
     world_size = dist.get_world_size(group)
     tensor = bucket.buffer()
+    _log_bucket_layout(bucket)
     block, min_bytes, budget, error_feedback = _config()
 
     if world_size < 2 or tensor.nbytes < min_bytes:
@@ -579,6 +748,46 @@ def fp8_a2a_allgather_hook(process_group, bucket):
     if st is None:
         return allreduce_hook(process_group, bucket)
     S, chunk_u8 = st.S, st.chunk_u8
+
+    # Selective precision: snapshot the exempt positions before the fp8 path
+    # mutates the buffer and reduce them to the exact fp32 cross-rank mean *now*.
+    # The all_reduce runs synchronously in the hook body so every rank issues it
+    # in the same deterministic bucket order as the a2a/all-gather below; issuing
+    # it from the async all-gather callback let ranks enqueue this third
+    # collective in divergent orders on the shared NCCL communicator and
+    # cross-wired the reduction. Because exempt always takes the synchronous
+    # inline path below (see the branch guard), the snapshot is produced and
+    # consumed on the same stream -- no cross-stream event is needed.
+    #
+    # Every buffer here is pre-allocated and reused (``_exempt_buffers``,
+    # ``_exempt_indices``): the ``index_select`` writes into ``gather`` via
+    # ``out=`` and the reduce is in place, so the whole correction allocates
+    # nothing per step and is CUDA-graph capture-safe. Only the scatter is
+    # deferred, because the fp8 all-gather overwrites the whole buffer and would
+    # otherwise clobber the exact values.
+    exempt_idx = _exempt_indices(bucket, tensor.device)
+    exempt_snapshot = None
+    exempt_gather = None
+    if exempt_idx is not None:
+        exempt_gather, exempt_snapshot = _exempt_buffers(
+            bucket.index(), exempt_idx.numel(), tensor.dtype, tensor.device
+        )
+        torch.index_select(tensor, 0, exempt_idx, out=exempt_gather)
+        if exempt_snapshot is not exempt_gather:
+            exempt_snapshot.copy_(exempt_gather)
+        dist.all_reduce(exempt_snapshot, group=group, async_op=False)
+        exempt_snapshot.div_(world_size)
+
+    def patch_exempt():
+        """Write the exact cross-rank mean back over the exempt positions."""
+        if exempt_snapshot is None:
+            return
+        if exempt_snapshot is exempt_gather:
+            tensor.index_copy_(0, exempt_idx, exempt_snapshot)
+        else:
+            # fp32 mean -> bucket dtype, into the persistent gather buffer.
+            exempt_gather.copy_(exempt_snapshot)
+            tensor.index_copy_(0, exempt_idx, exempt_gather)
 
     def quantize_send():
         """Quantize the bucket into ``st.send``, applying error feedback first.
@@ -620,7 +829,24 @@ def fp8_a2a_allgather_hook(process_group, bucket):
         """Write the gathered shards back into the bucket, in shard order."""
         dequant_scatter(st.recv, tensor, st.numel, S, chunk_u8, world_size, block)
 
-    if _is_cuda_graph_capturing():
+    # Selective precision also forces the synchronous inline path. The exempt
+    # correction adds a third collective (the fp32 all_reduce above) that has to
+    # stay ordered against this bucket's a2a/all-gather on the shared NCCL
+    # communicator, and its result is consumed by ``patch_exempt``. Driving that
+    # through the async continuation chain let the exempt all_reduce interleave
+    # with other buckets' collectives differently on each rank -- provably
+    # nondeterministic (identical configs diverged by iter 3 and NaN'd within a
+    # few steps, while the plain hook stayed bit-reproducible). Running the whole
+    # dataflow inline on one stream, one bucket at a time, removes the
+    # interleaving and the cross-stream read; the cost is losing comm/backward
+    # overlap on exempt buckets.
+    #
+    # This inline path *is* CUDA-graph capturable: every exempt buffer is
+    # pre-allocated (``_exempt_buffers``), so capture -- which forbids fresh
+    # allocations and cannot join the host-side continuation chain the overlap
+    # path uses -- sees only pre-allocated tensors and stream-ordered kernels
+    # plus a synchronous NCCL enqueue.
+    if _is_cuda_graph_capturing() or exempt_snapshot is not None:
         # CUDA Graph capture cannot join the host-side continuation chain used
         # by the overlap path.  Enqueue the complete dataflow on the capture
         # stream and hand DDP an already-resolved Future; NCCL's synchronous
@@ -631,6 +857,7 @@ def fp8_a2a_allgather_hook(process_group, bucket):
         dequant_reduce(st.recv, st.shard, S, chunk_u8, world_size, block)
         launch_allgather(async_op=False)
         finish_allgather()
+        patch_exempt()
         return _completed_future(tensor)
 
     quantize_send()
