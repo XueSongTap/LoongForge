@@ -11,7 +11,6 @@ Replaces DDP's bf16 ring AllReduce with
 from __future__ import annotations
 
 import logging
-import os
 
 import torch
 import torch.distributed as dist
@@ -70,15 +69,26 @@ _ACCELERATOR_ERROR = getattr(torch, "AcceleratorError", RuntimeError)
 FLAG = "--ddp-comm-hook fp8_a2a_allgather_hook"
 
 
-# ── Selective-precision exemption (FP8_A2A_EXEMPT) ───────────────────────────
+# ── Selective-precision exemption (ddp_comm_hook_fp8_exempt) ─────────────────
 # id(param) -> qualified name, populated at DDP-wrap time so the comm hook can
 # attribute each slice of a bucket buffer to its parameter and decide, per
 # element, whether to keep it in exact precision instead of quantizing it.
 _PARAM_NAMES: dict[int, str] = {}
-# Per-bucket cache of the exempt element indices (LongTensor on device) and a
-# one-time layout log guard.
+# Structural membership sets, also populated at DDP-wrap time by walking the
+# module tree. Matching by module type / leaf name (not name substring) keeps
+# the exemption model-agnostic: 'embed' is exactly the params of an nn.Embedding,
+# and 'head' is exactly the params of an output-head leaf, so a container module
+# that merely has 'head'/'embed' in its qualified path (e.g. GR00T's top-level
+# ``action_head``) is never swept in wholesale.
+_EMBED_IDS: set[int] = set()
+_HEAD_IDS: set[int] = set()
+# Parsed exempt spec (set of tokens) or None when disabled. Set by configure().
+_EXEMPT_SPEC: "set[str] | None" = None
+# Valid exempt tokens and the leaf module names that count as an output head.
+EXEMPT_TOKENS = ("1d", "embed", "head")
+_HEAD_LEAF_NAMES = ("lm_head", "output", "score", "classifier")
+# Per-bucket cache of the exempt element indices (LongTensor on device).
 _EXEMPT_IDX: dict[int, "tuple[int, torch.Tensor | None]"] = {}
-_LAYOUT_LOGGED: set[int] = set()
 # Persistent per-bucket buffers for the exempt reduce, so the snapshot/all-reduce
 # allocate nothing per step and the whole exempt correction is CUDA-graph
 # capture-safe. Keyed by bucket index, rebuilt when the exempt count changes.
@@ -86,26 +96,35 @@ _EXEMPT_BUF: dict[int, "tuple[torch.Tensor, torch.Tensor]"] = {}
 
 
 def set_param_names(model) -> None:
-    """Record id(param) -> name for the model DDP is about to wrap.
+    """Record structural exemption metadata for the model DDP is about to wrap.
 
     Called from ``parallel.py`` before the comm hook is registered. The comm
     hook only receives ``(state, bucket)``; matching ``bucket.parameters()`` back
-    to names needs this map built while the model is still in hand.
+    to names (``_PARAM_NAMES``) and to their owning module class (``_EMBED_IDS`` /
+    ``_HEAD_IDS``) needs the module tree, so it is walked once here while the
+    model is still in hand.
     """
+    import torch.nn as nn
     _PARAM_NAMES.clear()
+    _EMBED_IDS.clear()
+    _HEAD_IDS.clear()
     _EXEMPT_IDX.clear()
     _EXEMPT_BUF.clear()
-    _LAYOUT_LOGGED.clear()
     for name, param in model.named_parameters():
         _PARAM_NAMES[id(param)] = name
+    for mod_name, module in model.named_modules():
+        leaf = mod_name.rsplit(".", 1)[-1]
+        if isinstance(module, nn.Embedding):
+            for param in module.parameters(recurse=False):
+                _EMBED_IDS.add(id(param))
+        if leaf in _HEAD_LEAF_NAMES:
+            for param in module.parameters(recurse=False):
+                _HEAD_IDS.add(id(param))
 
 
 def _exempt_spec():
-    """Parse ``FP8_A2A_EXEMPT``: comma list of {1d,embed,head}. Empty -> off."""
-    raw = os.environ.get("FP8_A2A_EXEMPT", "").strip()
-    if not raw:
-        return None
-    return {tok.strip() for tok in raw.split(",") if tok.strip()}
+    """Return the parsed exempt token set (from ``configure``), or None if off."""
+    return _EXEMPT_SPEC
 
 
 def _is_exempt(name: str, param, spec) -> bool:
@@ -113,17 +132,20 @@ def _is_exempt(name: str, param, spec) -> bool:
 
     ``1d``    -> every 1-D tensor (RMSNorm/LayerNorm scales, biases): tiny byte
                  count, high loss sensitivity (they scale activations directly).
-    ``embed`` -> names containing 'embed' (token/patch embeddings).
-    ``head``  -> names containing 'lm_head'/'output'/'head' (the un-embedding).
+    ``embed`` -> params of an ``nn.Embedding`` module (structural, so the token
+                 embedding is caught whatever it is named and an MLP that merely
+                 has 'embed' in its path is not).
+    ``head``  -> params of an output-head leaf module (``lm_head`` / ``output`` /
+                 ``score`` / ``classifier``); structural, so a container named
+                 ``action_head`` is not swept in as a whole.
     """
     if spec is None:
         return False
     if "1d" in spec and param.dim() <= 1:
         return True
-    lname = name.lower()
-    if "embed" in spec and "embed" in lname:
+    if "embed" in spec and id(param) in _EMBED_IDS:
         return True
-    if "head" in spec and ("lm_head" in lname or "head" in lname or ".output" in lname):
+    if "head" in spec and id(param) in _HEAD_IDS:
         return True
     return False
 
@@ -144,37 +166,6 @@ def _bucket_param_slices(bucket):
         name = _PARAM_NAMES.get(id(param), f"<unknown@{id(param)}>")
         offset = (grad.data_ptr() - base) // esize
         yield name, param, offset, grad.numel()
-
-
-def _log_bucket_layout(bucket) -> None:
-    """One-time per-bucket dump of param name/shape/offset/exempt-flag.
-
-    Gated by ``FP8_A2A_LAYOUT_LOG``. Prints an aggregate exempt byte fraction so
-    the selective-precision cost can be read straight from the log.
-    """
-    if not os.environ.get("FP8_A2A_LAYOUT_LOG"):
-        return
-    index = bucket.index()
-    if index in _LAYOUT_LOGGED:
-        return
-    _LAYOUT_LOGGED.add(index)
-    spec = _exempt_spec()
-    total = exempt = 0
-    lines = []
-    for name, param, offset, numel in _bucket_param_slices(bucket):
-        ex = _is_exempt(name, param, spec)
-        total += numel
-        if ex:
-            exempt += numel
-        lines.append(
-            f"    off={offset:>10d} numel={numel:>10d} dim={param.dim()} "
-            f"exempt={int(ex)} {name} {tuple(param.shape)}"
-        )
-    frac = exempt / total if total else 0.0
-    logger.info(
-        "fp8_a2a layout: bucket=%d params=%d numel=%d exempt_numel=%d (%.4f%%)\n%s",
-        index, len(lines), total, exempt, frac * 100.0, "\n".join(lines),
-    )
 
 
 def _exempt_indices(bucket, device):
@@ -207,6 +198,14 @@ def _exempt_indices(bucket, device):
             ranges.append(torch.arange(offset, offset + numel, device=device))
     idx = torch.cat(ranges) if ranges else None
     _EXEMPT_IDX[index] = (buf_numel, idx)
+    # One-time visibility per (bucket, size): a large exempt fraction means the
+    # extra fp32 AllReduce is no longer cheap (e.g. a big trainable vocab
+    # embedding under 'embed'); logging it lets that surface without a hard cap.
+    n_ex = idx.numel() if idx is not None else 0
+    logger.info(
+        "fp8_a2a exempt: bucket %d -> %d/%d elems exact (%.3f%%)",
+        index, n_ex, buf_numel, 100.0 * n_ex / max(buf_numel, 1),
+    )
     return idx
 
 
@@ -642,7 +641,7 @@ def ef_residual(quantized, residual, value, numel, S, chunk_u8, num_chunks, bloc
 
 def configure(block: int = DEFAULT_BLOCK, min_mib: float = DEFAULT_MIN_MIB,
               max_scratch_gb: float = DEFAULT_MAX_SCRATCH_GB,
-              error_feedback: str = "none") -> None:
+              error_feedback: str = "none", exempt: str = "") -> None:
     """Set the hook's tunables. Called once from ``parallel.py`` at install time.
 
     DDP fixes the comm-hook signature at ``(state, bucket)``, so the knobs cannot
@@ -652,8 +651,11 @@ def configure(block: int = DEFAULT_BLOCK, min_mib: float = DEFAULT_MIN_MIB,
     changes which buffers exist, so any scratch allocated under the previous
     value is dropped rather than silently reused with a stale ``chunk_u8`` or a
     missing residual.
+
+    ``exempt`` is a comma list of ``EXEMPT_TOKENS`` (empty -> off); it drives the
+    selective-precision exemption evaluated per element in the hook.
     """
-    global _BLOCK, _MIN_BYTES, _MAX_SCRATCH_BYTES, _ERROR_FEEDBACK
+    global _BLOCK, _MIN_BYTES, _MAX_SCRATCH_BYTES, _ERROR_FEEDBACK, _EXEMPT_SPEC
     # Power of two because all three kernels index with tl.arange(0, BLOCK).
     if block <= 0 or block & (block - 1):
         raise ValueError(
@@ -678,15 +680,24 @@ def configure(block: int = DEFAULT_BLOCK, min_mib: float = DEFAULT_MIN_MIB,
             f"ddp_comm_hook_fp8_error_feedback must be one of {EF_MODES}, "
             f"got {error_feedback!r}"
         )
+    tokens = {tok.strip() for tok in exempt.split(",") if tok.strip()}
+    bad = tokens - set(EXEMPT_TOKENS)
+    if bad:
+        raise ValueError(
+            f"ddp_comm_hook_fp8_exempt tokens must be a subset of {EXEMPT_TOKENS}, "
+            f"got unknown {sorted(bad)}"
+        )
     if block != _BLOCK or error_feedback != _ERROR_FEEDBACK:
         reset_scratch()
     _BLOCK = block
     _MIN_BYTES = int(min_mib * 2**20)
     _MAX_SCRATCH_BYTES = int(max_scratch_gb * 2**30)
     _ERROR_FEEDBACK = error_feedback
+    _EXEMPT_SPEC = tokens or None
     logger.info(
-        "fp8_a2a: block=%d min_mib=%g max_scratch_gb=%g error_feedback=%s",
+        "fp8_a2a: block=%d min_mib=%g max_scratch_gb=%g error_feedback=%s exempt=%s",
         block, min_mib, max_scratch_gb, _ERROR_FEEDBACK,
+        ",".join(sorted(_EXEMPT_SPEC)) if _EXEMPT_SPEC else "off",
     )
 
 
@@ -734,7 +745,6 @@ def fp8_a2a_allgather_hook(process_group, bucket):
     group = process_group if process_group is not None else dist.group.WORLD
     world_size = dist.get_world_size(group)
     tensor = bucket.buffer()
-    _log_bucket_layout(bucket)
     block, min_bytes, budget, error_feedback = _config()
 
     if world_size < 2 or tensor.nbytes < min_bytes:
