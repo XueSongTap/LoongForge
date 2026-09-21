@@ -243,6 +243,9 @@ def _exempt_shard_indices(bucket, S, rank, device):
         local = None
     _EXEMPT_SHARD_IDX[index] = (buf_numel, S, local)
     return local
+
+
+def _exempt_buffers(index, n, dtype, device):
     """Persistent (gather, fp32) buffers for the capture-safe exempt reduce.
 
     ``gather`` matches the bucket dtype and receives ``index_select(out=...)``;
