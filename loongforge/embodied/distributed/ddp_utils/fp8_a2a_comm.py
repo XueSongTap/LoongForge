@@ -93,6 +93,11 @@ _EXEMPT_IDX: dict[int, "tuple[int, torch.Tensor | None]"] = {}
 # allocate nothing per step and the whole exempt correction is CUDA-graph
 # capture-safe. Keyed by bucket index, rebuilt when the exempt count changes.
 _EXEMPT_BUF: dict[int, "tuple[torch.Tensor, torch.Tensor]"] = {}
+# Per-bucket cache of exempt positions remapped into this rank's all-gather
+# shard window (used to zero the AllGather-leg EF residual at exempt offsets).
+# Keyed by bucket index; stores (buf_numel, shard_numel, LongTensor | None) so it
+# rebuilds when either the fused/steady-state buffer or the shard size changes.
+_EXEMPT_SHARD_IDX: dict[int, "tuple[int, int, torch.Tensor | None]"] = {}
 
 
 def set_param_names(model) -> None:
@@ -110,6 +115,7 @@ def set_param_names(model) -> None:
     _HEAD_IDS.clear()
     _EXEMPT_IDX.clear()
     _EXEMPT_BUF.clear()
+    _EXEMPT_SHARD_IDX.clear()
     for name, param in model.named_parameters():
         _PARAM_NAMES[id(param)] = name
     for mod_name, module in model.named_modules():
@@ -209,7 +215,34 @@ def _exempt_indices(bucket, device):
     return idx
 
 
-def _exempt_buffers(index, n, dtype, device):
+def _exempt_shard_indices(bucket, S, rank, device):
+    """Exempt positions remapped into this rank's all-gather shard window.
+
+    The AllGather-leg EF residual (``res2``) lives in shard space of length
+    ``S = buf_numel // world_size`` and this rank owns the slice ``[rank*S,
+    (rank+1)*S)`` of the bucket. ``patch_exempt`` overwrites the exact fp32 mean
+    at every exempt offset, so the residual that the fp8 shard path tracked for
+    those same offsets is stale and must be zeroed -- but only for the exempt
+    elements that fall in *this* rank's shard. Returns their shard-local offsets
+    (global index minus ``rank*S``), or ``None`` when exemption is off or no
+    exempt element lands in this shard. Cached like ``_exempt_indices``, guarded
+    on both ``buf_numel`` and ``S`` so a bucket rebuild rebuilds the map.
+    """
+    index = bucket.index()
+    buf_numel = bucket.buffer().numel()
+    cached = _EXEMPT_SHARD_IDX.get(index)
+    if cached is not None and cached[0] == buf_numel and cached[1] == S:
+        return cached[2]
+    idx = _exempt_indices(bucket, device)
+    if idx is None:
+        _EXEMPT_SHARD_IDX[index] = (buf_numel, S, None)
+        return None
+    lo, hi = rank * S, (rank + 1) * S
+    local = idx[(idx >= lo) & (idx < hi)] - lo
+    if local.numel() == 0:
+        local = None
+    _EXEMPT_SHARD_IDX[index] = (buf_numel, S, local)
+    return local
     """Persistent (gather, fp32) buffers for the capture-safe exempt reduce.
 
     ``gather`` matches the bucket dtype and receives ``index_select(out=...)``;
@@ -591,6 +624,7 @@ def reset_scratch() -> None:
     _SCRATCH_BYTES = 0
     _OVER_BUDGET.clear()
     _EXEMPT_BUF.clear()
+    _EXEMPT_SHARD_IDX.clear()
 
 
 def quantize_chunks(x, out_u8, numel, S, chunk_u8, num_chunks, block):
@@ -778,6 +812,7 @@ def fp8_a2a_allgather_hook(process_group, bucket):
     exempt_idx = _exempt_indices(bucket, tensor.device)
     exempt_snapshot = None
     exempt_gather = None
+    exempt_shard_idx = None
     if exempt_idx is not None:
         exempt_gather, exempt_snapshot = _exempt_buffers(
             bucket.index(), exempt_idx.numel(), tensor.dtype, tensor.device
@@ -787,9 +822,24 @@ def fp8_a2a_allgather_hook(process_group, bucket):
             exempt_snapshot.copy_(exempt_gather)
         dist.all_reduce(exempt_snapshot, group=group, async_op=False)
         exempt_snapshot.div_(world_size)
+        # Cache exempt offsets in shard space once (eager warm-up ⇒ capture-safe)
+        # so the AllGather-leg residual can be zeroed at those positions below.
+        if st.res2 is not None:
+            exempt_shard_idx = _exempt_shard_indices(
+                bucket, S, dist.get_rank(group), tensor.device
+            )
 
     def patch_exempt():
-        """Write the exact cross-rank mean back over the exempt positions."""
+        """Write the exact cross-rank mean back over the exempt positions.
+
+        Also drop the EF residual there: both quantize legs tracked a residual
+        for the exempt offsets, but this exact mean overwrites them, so that
+        residual is phantom -- carrying it forward would inject a growing bias
+        into exactly the params exemption is meant to protect, and it perturbs
+        the fp8 block scale shared with real neighbours. Zeroing keeps EF and
+        exemption orthogonal. ``res1`` is in bucket space (same indices as
+        ``exempt_idx``); ``res2`` is in this rank's shard space.
+        """
         if exempt_snapshot is None:
             return
         if exempt_snapshot is exempt_gather:
@@ -798,6 +848,10 @@ def fp8_a2a_allgather_hook(process_group, bucket):
             # fp32 mean -> bucket dtype, into the persistent gather buffer.
             exempt_gather.copy_(exempt_snapshot)
             tensor.index_copy_(0, exempt_idx, exempt_gather)
+        if st.res1 is not None:
+            st.res1.index_fill_(0, exempt_idx, 0.0)
+        if st.res2 is not None and exempt_shard_idx is not None:
+            st.res2.index_fill_(0, exempt_shard_idx, 0.0)
 
     def quantize_send():
         """Quantize the bucket into ``st.send``, applying error feedback first.
