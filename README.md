@@ -132,7 +132,7 @@ Since optimal training strategies differ across model families and scales, Loong
 **🤖 Embodied Models**
 
 * **VLA & WAM Training** — A dedicated **torch-native DDP/FSDP** subsystem for **VLA and world-action (WAM)** models, decoupled from the Megatron core, with flexible **DDP / ZeRO-1 / FSDP / HSDP** strategies. [[README](./loongforge/embodied)]
-* **FSDP2 Delta-FP8 Param AllGather** — Optionally compresses BF16 FSDP2 AllGather deltas into blockwise FP8 on supported NVIDIA GPUs while keeping model computation in BF16. [[Usage](./docs/source/features/delta_fp8_allgather.md)]
+* **FP8 Communication Optimization** — Optional FP8 E4M3 communication optimizations that cut cross-rank traffic on supported NVIDIA GPUs while keeping model computation in BF16, covering both parallel strategies: blockwise FP8 delta AllGather for **FSDP2** parameters, and FP8 grad all-reduce for **DDP** gradients. [[Usage](./docs/source/features/fp8_communication.md)]
 * **Per-Model Deep Optimization** — Training code deeply customized for each supported model across I/O, communication strategy, and kernel efficiency — **1.79×–4.38×** over official baselines in our [benchmarks](#performance).
 * **Unified Evaluation** — Evaluate trained policies on **LIBERO / CALVIN / SimplerEnv / RoboTwin**, with coverage expanding continuously.
 

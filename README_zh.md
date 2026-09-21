@@ -132,7 +132,7 @@
 **🤖 具身模型**
 
 * **VLA 与 WAM 训练** —— 面向 **VLA 与世界-动作模型（WAM）** 的独立 **torch 原生 DDP/FSDP** 子系统，与 Megatron 核心解耦，支持 **DDP / ZeRO-1 / FSDP / HSDP** 多种分布式策略。[[README](./loongforge/embodied)]
-* **FSDP2 Delta-FP8 Param AllGather** —— 在支持的 NVIDIA GPU 上，可选将 BF16 FSDP2 AllGather 的参数差值按 block 压缩为 FP8，模型计算仍保持 BF16。[[使用方法](./docs/source_zh/features/delta_fp8_allgather.md)]
+* **FP8 通信优化** —— 在支持的 NVIDIA GPU 上，用 FP8 E4M3 压缩跨卡通信量、模型计算仍保持 BF16 的可选优化，覆盖两种并行策略：**FSDP2** 场景对参数 AllGather 做按 block 的 FP8 delta 压缩，**DDP** 场景做 FP8 梯度 all-reduce。[[使用方法](./docs/source_zh/features/fp8_communication.md)]
 * **逐模型深度定制优化** —— 针对当前覆盖的每个模型深度优化训练代码，涵盖 I/O、通信策略、算子效率等维度，实测相对官方基线 **1.79×–4.38× 加速**（见[性能表现](#performance)）。
 * **统一评测** —— 在 **LIBERO / CALVIN / SimplerEnv / RoboTwin** 上评测训练出的策略，覆盖度持续完善。
 
