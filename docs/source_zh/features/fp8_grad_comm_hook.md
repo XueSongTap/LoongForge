@@ -1,8 +1,8 @@
-# FP8 DDP Grad AllReduce
+# DDP FP8 Grad AllReduce
 
-FP8 DDP Grad AllReduce（`fp8_a2a_allgather_hook`）是 LoongForge embodied 训练栈中一项可选的 DDP 通信优化。它把每个梯度 bucket 量化成 FP8 E4M3，走 AllToAll，本地按 FP32 reduce，再重新量化并用 AllGather 把结果收回，从而压缩梯度 all-reduce 的通信量。该功能只改变通信精度，不影响 forward / backward 计算。
+DDP FP8 Grad AllReduce（`fp8_a2a_allgather_hook`）是 LoongForge embodied 训练栈中一项可选的 DDP 通信优化。它把每个梯度 bucket 量化成 FP8 E4M3，走 AllToAll，本地按 FP32 reduce，再重新量化并用 AllGather 把结果收回，从而压缩梯度 all-reduce 的通信量。该功能只改变通信精度，不影响 forward / backward 计算。
 
-本 hook 作用于 **DDP 下的梯度**，是 [Delta-FP8 FSDP2 Param AllGather](delta_fp8_allgather.md) 的 DDP 对应物——后者压缩的是 **FSDP2 下的参数** AllGather 通信量。按并行策略二选一，两者不同时使用。它们都与 LoongForge 端到端 [FP8 训练](fp8_training.md) 相互独立，不会把权重、激活或 GEMM 转为 FP8。
+本 hook 作用于 **DDP 下的梯度**，是 [FSDP2 Delta-FP8 Param AllGather](delta_fp8_allgather.md) 的 DDP 对应物——后者压缩的是 **FSDP2 下的参数** AllGather 通信量。按并行策略二选一，两者不同时使用。它们都与 LoongForge 端到端 [FP8 训练](fp8_training.md) 相互独立，不会把权重、激活或 GEMM 转为 FP8。
 
 ## 1. 使用条件
 

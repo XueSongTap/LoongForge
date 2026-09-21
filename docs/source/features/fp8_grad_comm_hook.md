@@ -1,8 +1,8 @@
-# FP8 DDP Grad AllReduce
+# DDP FP8 Grad AllReduce
 
-FP8 DDP Grad AllReduce (`fp8_a2a_allgather_hook`) is an opt-in DDP communication optimization for the LoongForge embodied training stack. It compresses the gradient all-reduce by quantizing each gradient bucket to FP8 E4M3, running an AllToAll, reducing locally in FP32, requantizing, and gathering the result back with an AllGather. It changes communication precision only; forward and backward computation are unaffected.
+DDP FP8 Grad AllReduce (`fp8_a2a_allgather_hook`) is an opt-in DDP communication optimization for the LoongForge embodied training stack. It compresses the gradient all-reduce by quantizing each gradient bucket to FP8 E4M3, running an AllToAll, reducing locally in FP32, requantizing, and gathering the result back with an AllGather. It changes communication precision only; forward and backward computation are unaffected.
 
-This hook operates on **gradients under DDP**. It is the DDP counterpart of [Delta-FP8 FSDP2 Param AllGather](delta_fp8_allgather.md), which compresses parameter AllGather traffic under FSDP2. Pick the one that matches your parallel strategy; they are not used together. Both are independent of LoongForge's end-to-end [FP8 training](fp8_training.md) and do not convert weights, activations, or GEMMs to FP8.
+This hook operates on **gradients under DDP**. It is the DDP counterpart of [FSDP2 Delta-FP8 Param AllGather](delta_fp8_allgather.md), which compresses parameter AllGather traffic under FSDP2. Pick the one that matches your parallel strategy; they are not used together. Both are independent of LoongForge's end-to-end [FP8 training](fp8_training.md) and do not convert weights, activations, or GEMMs to FP8.
 
 ## 1. Requirements
 

@@ -4,7 +4,7 @@ LoongForge 为 embodied 训练栈提供两项可选的 FP8 通信优化。二者
 
 按并行策略二选一；它们作用于不同的 collective，不同时使用。
 
-| | [Delta-FP8 FSDP2 Param AllGather](delta_fp8_allgather.md) | [FP8 DDP Grad AllReduce](fp8_grad_comm_hook.md) |
+| | [FSDP2 Delta-FP8 Param AllGather](delta_fp8_allgather.md) | [DDP FP8 Grad AllReduce](fp8_grad_comm_hook.md) |
 | --- | --- | --- |
 | 并行策略 | FSDP2 | DDP |
 | 压缩对象 | 参数 AllGather | 梯度 all-reduce |

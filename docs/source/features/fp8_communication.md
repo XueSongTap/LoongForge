@@ -4,7 +4,7 @@ LoongForge provides two opt-in FP8 communication optimizations for the embodied 
 
 Pick the one that matches your parallel strategy; they operate on different collectives and are not used together.
 
-| | [Delta-FP8 FSDP2 Param AllGather](delta_fp8_allgather.md) | [FP8 DDP Grad AllReduce](fp8_grad_comm_hook.md) |
+| | [FSDP2 Delta-FP8 Param AllGather](delta_fp8_allgather.md) | [DDP FP8 Grad AllReduce](fp8_grad_comm_hook.md) |
 | --- | --- | --- |
 | Parallel strategy | FSDP2 | DDP |
 | Compresses | Parameter AllGather | Gradient all-reduce |
