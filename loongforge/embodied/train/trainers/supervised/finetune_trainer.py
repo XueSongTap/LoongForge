@@ -10,7 +10,7 @@ only declares these as abstract methods.
 
 import inspect
 import logging
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from typing import Dict, Tuple
 
 import torch
@@ -81,25 +81,10 @@ class FinetuneTrainer(BaseTrainer):
             else torch.autocast("cuda", dtype=dtype)
         )
 
-        with self._noise_rng_context(), self._fp8_forward_ctx(), autocast_ctx:
+        with self._fp8_forward_ctx(), autocast_ctx:
             loss, log_loss_dict = self.model(batch, **fwd_kwargs)
 
         return loss, log_loss_dict
-
-    @contextmanager
-    def _noise_rng_context(self):
-        """Fork the RNG and reseed it with ``seed + rank + completed_steps`` (``--step-seeded-noise``).
-
-        Noise/timestep sampling inside the forward then depends only on the step,
-        not on how much RNG data loading or earlier steps consumed.
-        """
-        if not self.training_args.step_seeded_noise:
-            yield
-            return
-        devices = [torch.cuda.current_device()] if torch.cuda.is_available() else []
-        with torch.random.fork_rng(devices=devices):
-            torch.manual_seed(self.training_args.seed + self.ctx.rank + self.completed_steps)
-            yield
 
     def _select_forward_kwargs(self, **candidates) -> Dict[str, object]:
         """Keep the candidate kwargs the model ``forward`` can actually accept.

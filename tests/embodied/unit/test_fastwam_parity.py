@@ -1,15 +1,13 @@
 # Copyright 2026 The LoongForge Authors.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the FastWAM loss-alignment options.
+"""Unit tests for FastWAM parity with the official implementation.
 
 Covers the FastWAM-style action/proprio normalization
-(``data.norm_stats_path``), the ``--step-seeded-noise`` RNG context and the
-FastWAM action scheduler default.
+(``data.norm_stats_path``) and the FastWAM action scheduler default.
 """
 
 import json
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -19,7 +17,6 @@ from loongforge.embodied.data.datasets.fastwam.transforms.fastwam_transform impo
     _fastwam_linear_params,
 )
 from loongforge.embodied.model.fastwam.modeling_configuration_fastwam import FastWAMModelConfig
-from loongforge.embodied.train.trainers.supervised.finetune_trainer import FinetuneTrainer
 
 
 def _stats(lo, hi, extra=None):
@@ -72,44 +69,6 @@ def test_normalize_unapply_roundtrip(stats_file):
     action = torch.tensor([[0.5, 1.5]])
     out = transform.unapply(transform.apply({"action": action.clone()}))
     assert torch.allclose(out["action"], action)
-
-
-def _fake_trainer(enabled, seed=7, rank=0, step=0):
-    return SimpleNamespace(
-        training_args=SimpleNamespace(step_seeded_noise=enabled, seed=seed),
-        ctx=SimpleNamespace(rank=rank),
-        completed_steps=step,
-    )
-
-
-def _draw(trainer):
-    with FinetuneTrainer._noise_rng_context(trainer):
-        return torch.randn(4)
-
-
-def test_step_seeded_noise_depends_only_on_seed_rank_step():
-    torch.manual_seed(0)
-    a = _draw(_fake_trainer(True, step=3))
-    torch.randn(100)  # consume RNG in between, e.g. data loading
-    b = _draw(_fake_trainer(True, step=3))
-    assert torch.equal(a, b)
-    assert not torch.equal(a, _draw(_fake_trainer(True, step=4)))
-    assert not torch.equal(a, _draw(_fake_trainer(True, rank=1, step=3)))
-
-
-def test_step_seeded_noise_leaves_outer_rng_untouched():
-    torch.manual_seed(0)
-    _draw(_fake_trainer(True, step=3))
-    after = torch.randn(4)
-    torch.manual_seed(0)
-    assert torch.equal(after, torch.randn(4))
-
-
-def test_step_seeded_noise_disabled_uses_global_rng():
-    torch.manual_seed(0)
-    a = _draw(_fake_trainer(False))
-    torch.manual_seed(0)
-    assert torch.equal(a, torch.randn(4))
 
 
 def test_action_scheduler_defaults_match_fastwam():

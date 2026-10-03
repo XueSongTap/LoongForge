@@ -262,14 +262,6 @@ class _BasicTrainingArgs:
             "help": "If True, seed += torch.distributed.get_rank()"
         },
     )
-    step_seeded_noise: bool = field(
-        default=False,
-        metadata={
-            "help": "Run each training forward inside a forked RNG reseeded with "
-                    "seed + rank + step, so noise/timestep sampling is independent "
-                    "of data loading and reproducible across frameworks."
-        },
-    )
     deterministic_mode: bool = field(
         default=False,
         metadata={
