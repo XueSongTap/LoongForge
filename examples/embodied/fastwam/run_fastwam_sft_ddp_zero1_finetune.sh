@@ -40,6 +40,14 @@ OUTPUT_DIR=${OUTPUT_DIR:-"$LOONGFORGE_PATH/outputs/fastwam_sft_zero1"}
 PRETRAINED_CHECKPOINT=${PRETRAINED_CHECKPOINT:-}
 ACTION_DIT_PRETRAINED_PATH=${ACTION_DIT_PRETRAINED_PATH:-"$LOCAL_VLA_ARTIFACTS_ROOT/fastwam/models/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt"}
 TEXT_EMBEDDING_CACHE_DIR=${TEXT_EMBEDDING_CACHE_DIR:-"$LOCAL_VLA_ARTIFACTS_ROOT/fastwam/datasets/text_embeds"}
+# FastWAM-format *_dataset_stats.json -- the same file the eval configs pass as
+# `dataset_statistics_path`. When set, action/proprio are normalized exactly like
+# FastWAM (min/max over the json stats, delta dims of padded steps zeroed), so the
+# trained policy matches the normalization used at eval time. When unset, the
+# generic q99 normalization over statistics recomputed from the dataset is used.
+NORM_STATS_PATH=${NORM_STATS_PATH:-}
+NORM_MODE=${NORM_MODE:-"min/max"}  # FastWAM processor norm_default_mode: min/max (LIBERO) | z-score (RoboTwin)
+DELTA_ACTION_DIM_MASK=${DELTA_ACTION_DIM_MASK:-"[true,true,true,true,true,true,false]"}  # LIBERO: eef pose delta, gripper absolute
 
 # ── Model config ──────────────────────────────────────────────
 MODEL_NAME=${MODEL_NAME:-"fastwam"}
@@ -121,6 +129,13 @@ if [[ -n "$ACTION_DIT_PRETRAINED_PATH" ]]; then
 fi
 if [[ -n "$TEXT_EMBEDDING_CACHE_DIR" ]]; then
     MODEL_DATA_OVERRIDES+=("data.text_embedding_cache_dir=$TEXT_EMBEDDING_CACHE_DIR")
+fi
+if [[ -n "$NORM_STATS_PATH" ]]; then
+    MODEL_DATA_OVERRIDES+=(
+        "data.norm_stats_path=$NORM_STATS_PATH"
+        "data.fastwam_norm_mode=$NORM_MODE"
+        "data.delta_action_dim_mask=$DELTA_ACTION_DIM_MASK"
+    )
 fi
 
 # ── Launch ────────────────────────────────────────────────────
