@@ -3,11 +3,14 @@
 
 """Unit tests for FastWAM parity with the official implementation.
 
-Covers the FastWAM-style action/proprio normalization
-(``data.norm_stats_path``) and the FastWAM action scheduler default.
+Covers the FastWAM-style action/proprio normalization (``data.norm_stats_path``),
+the FastWAM action scheduler default and the ``linear_warmup_cosine_annealing``
+LR schedule.
 """
 
 import json
+import math
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -77,3 +80,38 @@ def test_action_scheduler_defaults_match_fastwam():
     video = cfg["video_scheduler"].default_factory()
     assert action["train_shift"] == 1.0 and action["infer_shift"] == 1.0
     assert video["train_shift"] == 5.0 and video["infer_shift"] == 5.0
+
+
+def _lr_trace(warmup, total, lr=1e-4, min_lr=1e-6):
+    from loongforge.embodied.optimizer.lr_scheduler import build_scheduler
+
+    opt = torch.optim.AdamW([torch.nn.Parameter(torch.zeros(1))], lr=lr)
+    args = SimpleNamespace(lr_decay_style="linear_warmup_cosine_annealing", lr_decay_iters=None,
+                           train_iters=total, lr_warmup_iters=warmup, min_lr=min_lr)
+    sched = build_scheduler(opt, args)
+    trace = []
+    for _ in range(total):
+        trace.append(opt.param_groups[0]["lr"])
+        opt.step()
+        sched.step()
+    return trace
+
+
+def test_linear_warmup_cosine_annealing_matches_fastwam_schedule():
+    # FastWAM: warmup = int(0.05 * total), LinearLR(1/W -> 1) then CosineAnnealingLR(T=total-W) to min_lr.
+    lr, min_lr, warmup, total = 1e-4, 1e-6, 20, 400
+    trace = _lr_trace(warmup, total, lr, min_lr)
+    assert trace[0] == pytest.approx(lr / warmup)
+    k = warmup // 2
+    assert trace[k] == pytest.approx(lr * (1 / warmup + (1 - 1 / warmup) * k / warmup))
+    assert trace[warmup] == pytest.approx(lr)
+    mid = warmup + (total - warmup) // 2
+    assert trace[mid] == pytest.approx(min_lr + (lr - min_lr) / 2, rel=1e-6)
+    last = math.cos(math.pi * (total - 1 - warmup) / (total - warmup))
+    assert trace[-1] == pytest.approx(min_lr + (lr - min_lr) * (1 + last) / 2, rel=1e-6)
+
+
+def test_linear_warmup_cosine_annealing_without_warmup():
+    trace = _lr_trace(0, 10)
+    assert trace[0] == pytest.approx(1e-4)
+    assert all(a >= b for a, b in zip(trace, trace[1:]))
